@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tomo_project"
+version = "0.0.1"
+description = "Tomographic data analysis - import pipeline skeleton"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "h5py",
+    "tifffile",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+# Tells setuptools that "core" and "data_import" (and their subpackages)
+# are the importable packages in this project -- this is what makes
+# `pip install -e .` register them so `import core` / `import data_import`
+# work from anywhere: notebooks, other scripts, VSCode's interpreter, etc.
+[tool.setuptools]
+packages = ["core", "data_import", "data_import.vendors"]
