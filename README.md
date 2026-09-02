@@ -5,6 +5,8 @@
 ```
 core/            shared data model, imported by everything, imports nothing from data_import
   metadata.py    FieldSpec, MetadataBundle -- the four-tier metadata model
+  known_fields.py   the catalog of every metadata field the software depends
+                     on: tier + resolution strategy (derive/default/ask/calculate) + unit
   handles.py     DataHandle, RamHandle, Hdf5DiskHandle -- RAM vs disk array access
   project.py     ProjectObject -- the container that flows through the pipeline
   data_interface.py   DataInterface -- the facade for reading data out of a ProjectObject
@@ -18,16 +20,38 @@ data_import/     everything about turning a file into a ProjectObject
   importer.py    DataImporter -- orchestrates detect -> plugin -> backend -> ProjectObject
   errors.py      NoVendorMatchError, AmbiguousVendorMatchError, ProjectImportError
   vendors/       one file per vendor plugin
-    generic.py     low-specificity fallback plugins (used when no real vendor matches)
-    synthetic.py   reference plugins matching the synthetic test fixture -- COPY THIS
-                    file as your template when adding a real vendor plugin
+    generic.py                     low-specificity fallback plugins (no real vendor matched)
+    synthetic.py                   reference plugins matching the synthetic test fixture --
+                                    COPY THIS file as your template when adding a real vendor
+    hypothetical_synchrotron.py    a second worked example (flats + voxel_size from file)
+
+completion/      fills in metadata a vendor's file didn't provide -- see USING_THE_PIPELINE.md
+  engine.py      run() (automatic pass) / provide() (record a user answer) / register_deriver()
+  derivers.py    the built-in derive functions (angles, angle_span, detector_pixel_size)
+
+preprocessing/   turns raw projections into reconstruction-ready sinograms
+  normalization.py  flat/dark correction -- pure numpy, no optional dependency
+  corrections.py    zinger/ring-artifact removal -- needs the optional `algotom` package
 
 tests/
   conftest.py                     shared fixtures, incl. `synthetic_data`
-  fixtures/generate_synthetic.py  generates the sphere+box+projection test data
+  fixtures/                       synthetic-data generators, one per vendor convention
   test_project.py                 ProjectObject / MetadataBundle logic, no files involved
   test_detection.py               plugin detection: match / fallback / no-match / ambiguous
   test_importer_end_to_end.py     full import round-trips, both formats, both storage modes
+  test_known_fields.py            reconcile() / status() against core/known_fields.py
+  test_completion.py              completion.run() / .provide()
+  test_derivers.py                the built-in derive functions
+  test_normalization.py           flat/dark correction
+  test_corrections.py             zinger/ring-artifact removal (skipped if algotom isn't installed)
+
+doc/
+  ARCHITECTURE.md          how and why the codebase is structured this way -- read this first
+  USING_THE_PIPELINE.md    end-user walkthrough: import -> completion -> preprocessing
+  PROJECT_METADATA.md      every metadata field's tier, strategy, unit, and notes
+  WRITING_A_PLUGIN.md      how to add support for a new instrument
+  GETTING_STARTED.md       environment setup
+  demo/                    worked Jupyter notebooks
 ```
 
 ## What changed from the first draft
@@ -53,26 +77,26 @@ pip install -r requirements.txt
 pytest tests/
 ```
 
+See [`doc/GETTING_STARTED.md`](./doc/GETTING_STARTED.md) for the full
+walkthrough (virtual env, editable install, Jupyter kernel setup, first
+import). `preprocessing/corrections.py`'s zinger/ring-artifact removal
+needs the optional `algotom` package — `pip install .[preprocessing]`,
+or `pip install algotom` directly; nothing else in this project
+requires it, and `tests/test_corrections.py` skips cleanly if it isn't
+installed.
+
 ## Adding support for a new instrument
 
 Copy `data_import/vendors/synthetic.py`, rename the class and its
 `signature` to match your vendor's actual file layout, adjust
 `get_path_map()` / `parse_metadata()`, add an import line for it in
 `data_import/vendors/__init__.py`. Nothing else in the codebase needs
-to change.
+to change. See [`doc/WRITING_A_PLUGIN.md`](./doc/WRITING_A_PLUGIN.md)
+for the full walkthrough.
 
-## Notes / what's unverified here
+## Where to go next
 
-`h5py` and `pytest` aren't installed in the sandbox this was built in,
-and there's no network access there to install them, so:
-- All files were syntax-checked (`py_compile`) and reviewed, but the
-  HDF5 code path itself was NOT executed here.
-- The TIFF path (detection, import, metadata tiers, DataInterface
-  round-trip, no-match and fallback behaviour) WAS fully exercised
-  manually and passes.
-
-First thing to do in the Claude Code / VSCode session:
-`pip install -r requirements.txt && pytest tests/` to confirm the HDF5
-tests too (`test_import_hdf5_ram`, `test_import_hdf5_disk`,
-`test_import_hdf5_disk_materialize_to_ram`, and the hdf5 cases in
-`test_detection.py`).
+- [`doc/ARCHITECTURE.md`](./doc/ARCHITECTURE.md) — how and why the
+  codebase is structured this way; read this first.
+- [`doc/USING_THE_PIPELINE.md`](./doc/USING_THE_PIPELINE.md) — using
+  the pipeline end to end: import, completion, preprocessing.

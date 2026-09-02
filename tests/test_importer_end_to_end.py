@@ -74,3 +74,17 @@ def test_import_tiff_disk_mode_rejected(synthetic_data):
     importer = DataImporter()
     with pytest.raises(ValueError):
         importer.import_project(synthetic_data["tiff_path"], format="tiff", storage_mode="disk")
+
+
+def test_import_reconciles_fields_no_plugin_mentions(synthetic_data):
+    """
+    angle_span is a core/known_fields.py entry the synthetic plugin
+    never mentions at all -- it should still show up as soft-missing
+    after import, proving import_project() actually calls
+    known_fields.reconcile() rather than relying on the plugin to
+    self-report every field the software depends on.
+    """
+    importer = DataImporter()
+    project = importer.import_project(synthetic_data["hdf5_path"], format="hdf5", storage_mode="ram")
+
+    assert "angle_span" in project.missing_soft_fields()

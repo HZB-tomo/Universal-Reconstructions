@@ -37,7 +37,16 @@ Tier = Literal["mandatory_hard", "mandatory_soft", "optional", "computed"]
 # "should I trust this or recompute it?" without needing a full history log
 # (we deliberately do NOT keep value history -- overwriting is fine, per
 # the earlier discussion; we just remember the most recent source).
-Source = Literal["file", "user", "computed", None]
+#   file     -- read straight out of the vendor's file by a plugin.
+#   user     -- typed in by a person (a notebook cell today, a GUI later).
+#   computed -- written by an algorithm, e.g. a calibration tool's estimate.
+#   default  -- the completion stage's automatic fallback value (see
+#               core/known_fields.py) -- distinct from "user" so it stays
+#               visible that nobody has actually confirmed this value yet.
+#   derived  -- computed automatically by completion from other fields
+#               already known (see core/known_fields.py), as opposed to
+#               "computed", which implies an algorithm ran over image data.
+Source = Literal["file", "user", "computed", "default", "derived", None]
 
 
 @dataclass

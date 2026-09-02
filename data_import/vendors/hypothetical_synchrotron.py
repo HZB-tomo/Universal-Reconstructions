@@ -64,11 +64,14 @@ class HypotheticalSynchrotronHdf5Plugin(ImportPlugin):
     def parse_metadata(self, handle, path_map: PathMap) -> MetadataBundle:
         bundle = MetadataBundle()
 
-        # mandatory_hard: this beamline always provides these, and
-        # without them there's nothing to reconstruct from.
+        # mandatory_hard: without projections/flats there's nothing to
+        # reconstruct from. angles is mandatory_soft instead -- even
+        # though this beamline always provides it, angles in general is
+        # recoverable later (derived from span + projection count, or
+        # asked for) rather than a hard import blocker.
         bundle.set("projections_path", path_map.projections, tier="mandatory_hard")
         bundle.set("flats_path", path_map.flats, tier="mandatory_hard")
-        bundle.set("angles", handle[_ANGLES][()], tier="mandatory_hard")
+        bundle.set("angles", handle[_ANGLES][()], tier="mandatory_soft")
 
         # mandatory_soft: voxel_size normally needs prompting for other
         # vendors, but THIS beamline always writes it -- so we read it

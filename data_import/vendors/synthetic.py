@@ -54,9 +54,12 @@ class SyntheticHdf5Plugin(ImportPlugin):
     def parse_metadata(self, handle, path_map: PathMap) -> MetadataBundle:
         bundle = MetadataBundle()
 
-        # mandatory_hard: without these, there's nothing to work with.
+        # mandatory_hard: without projections there's nothing to work
+        # with at all. angles is mandatory_soft -- if a vendor omits it,
+        # completion can still derive or ask for it later, so it
+        # shouldn't block import outright.
         bundle.set("projections_path", path_map.projections, tier="mandatory_hard")
-        bundle.set("angles", handle["/angles"][()], tier="mandatory_hard")
+        bundle.set("angles", handle["/angles"][()], tier="mandatory_soft")
 
         # optional: nice to record, nothing depends on it.
         bundle.set("operator", handle.attrs.get("operator"), tier="optional")
@@ -108,11 +111,11 @@ class SyntheticTiffPlugin(ImportPlugin):
         if sidecar is None:
             # Defensive fallback -- shouldn't happen since the signature
             # already required this sidecar to exist.
-            bundle.declare_missing("angles", tier="mandatory_hard")
+            bundle.declare_missing("angles", tier="mandatory_soft")
             bundle.declare_missing("operator", tier="optional")
         else:
             data = json.loads(sidecar.read_text())
-            bundle.set("angles", data.get("angles"), tier="mandatory_hard")
+            bundle.set("angles", data.get("angles"), tier="mandatory_soft")
             bundle.set("operator", data.get("operator"), tier="optional")
 
         bundle.declare_missing("voxel_size", tier="mandatory_soft")

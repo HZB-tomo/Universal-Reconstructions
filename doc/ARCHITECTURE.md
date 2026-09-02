@@ -7,31 +7,39 @@ the other docs in this folder) will make more sense afterward.
 
 ## The big picture
 
-There are two packages right now:
+Four packages so far:
 
 ```
-core/            the shared data model — every future module depends on this
+core/            the shared data model — every other package depends on this
 data_import/     turns a file on disk into a ProjectObject
+completion/      fills in metadata a vendor's file didn't provide
+preprocessing/   turns raw projections into reconstruction-ready sinograms
 ```
 
 `core/` is the foundation. It defines what a "loaded dataset" *is*
 (`ProjectObject`), how you read data out of one (`DataInterface`), how
-that data is actually stored (`DataHandle`), and how metadata is tracked
-(`MetadataBundle`). Nothing in `core/` knows anything about files, hdf5,
-tiff, or vendors — it would work identically if data arrived by some
-other means entirely.
+that data is actually stored (`DataHandle`), how metadata is tracked
+(`MetadataBundle`), and — since `completion/` was added — the single
+catalog of every metadata field the software actually depends on
+(`known_fields.py`). Nothing in `core/` knows anything about files,
+hdf5, tiff, or vendors — it would work identically if data arrived by
+some other means entirely.
 
-`data_import/` is the one and only thing (so far) that *produces* a
+`data_import/` is the one and only thing that *produces* a
 `ProjectObject`. It knows how to open hdf5/tiff files, how to figure out
 which vendor wrote a given file, and how to read that vendor's
 metadata into the shape `core/` expects.
 
-The dependency only goes one direction: `data_import` imports from
-`core`, never the other way around. Future modules (reconstruction,
-viewing, a GUI) will each depend on `core/` the same way, and probably
-won't need to depend on `data_import/` at all — they just take a
-`ProjectObject` that already exists and work with it via
-`DataInterface`.
+`completion/` and `preprocessing/` are the two pipeline stages after
+import — see [`USING_THE_PIPELINE.md`](./USING_THE_PIPELINE.md) for the
+end-user walkthrough of both. Each depends only on `core/`, exactly as
+originally planned here: neither imports anything from `data_import/`,
+they just take a `ProjectObject` that already exists (from `completion/`,
+possibly already partly filled in) and work with it via `DataInterface`.
+The one-way dependency rule from the original plan held up in practice.
+
+Still to come: calibration (center of rotation, tilt) and handing a
+project off to a reconstruction engine — neither is built yet.
 
 ## `core/` in detail
 
@@ -117,6 +125,29 @@ way.
 `DataInterface` also has `materialize_to_ram()`, which converts every
 disk-backed handle in a project into a RAM handle — the explicit,
 one-directional way a user says "load everything into memory now."
+
+### `known_fields.py` (`core/known_fields.py`)
+
+The single source of truth for every metadata field the software
+depends on: its tier (from `metadata.py`), its unit, and its
+**resolution strategy** — `derive` (compute it from other known
+fields), `default` (a fixed fallback), `ask` (no safe default, needs a
+human), or `calculate` (an algorithm proposes a value, a human
+confirms — calibration's job, not completion's). `MetadataBundle`
+itself stays deliberately generic and doesn't know what `voxel_size`
+means; this file is what stops that genericity from meaning every
+vendor plugin has to redeclare a field's tier itself, with the drift
+risk that implies.
+
+Two functions matter here: `reconcile(bundle)` fills in any known field
+a plugin never mentioned at all (declared missing, with the registry's
+tier) — called from `data_import`'s `import_project()` right after a
+plugin's `parse_metadata()` returns, so `mandatory_hard` enforcement no
+longer depends on every plugin author remembering to self-report a
+missing field correctly. `status(bundle)` gives a full readout of every
+known field's current state — see `completion/` below for what
+consumes it. See [`PROJECT_METADATA.md`](./PROJECT_METADATA.md) for the
+human-readable field-by-field reference.
 
 ## `data_import/` in detail
 
@@ -211,6 +242,81 @@ Each file here is either a real vendor plugin, or (for `generic.py`)
 the low-specificity fallback pair that catches anything no real plugin
 recognizes. See `WRITING_A_PLUGIN.md` for how to add a new one.
 
+## `completion/` in detail
+
+Given a `ProjectObject` fresh out of `DataImporter`, drive every
+`mandatory_soft` field toward resolved, using whichever strategy
+`core/known_fields.py` says applies. Two entry points:
+
+- **`run(project)`** — the automatic pass: tries `derive` then
+  `default`, in order, for every currently-missing field, and repeats
+  until a full pass makes no further progress (fields can depend on
+  each other — e.g. `angles` needs `rotation_direction`, which only
+  gets its own default applied during the same pass — so a single pass
+  isn't always enough). Never attempts `ask` or `calculate` — those
+  need a human, which is exactly what this function doesn't provide.
+- **`provide(project, key, value)`** — records an externally-collected
+  answer (`source="user"`), then re-runs the automatic pass, since one
+  answer can unblock others.
+
+Deliberately does no asking itself — there's no GUI yet (today:
+notebook/scripting; later: a GUI), and a blocking prompt baked into
+this code would only work for whichever one happens to be driving it.
+`core/known_fields.status(project.metadata)` is how a caller sees
+what's left.
+
+The actual per-field derive logic (`completion/derivers.py`) is kept
+separate from the generic pass/loop logic (`completion/engine.py`), the
+same split as `data_import/plugin.py` (the contract) vs.
+`data_import/vendors/*.py` (the actual per-vendor knowledge). Built-in
+derivers: `angle_span` (from `angles`), `angles` (from `angle_span` +
+projection count + `rotation_direction`), `detector_pixel_size` (from
+`voxel_size`). New derivers register via `@register_deriver("field_name")`,
+mirroring `@register_plugin`.
+
+`completion/` never touches `computed`-tier fields (`center_of_rotation`,
+`tilt_angle`) — those are calibration's job, a stage that doesn't exist
+yet.
+
+## `preprocessing/` in detail
+
+Turns a completion-ready project's raw projections into
+reconstruction-ready sinograms. Two files, two different dependency
+postures:
+
+- **`normalization.py`** — flat/dark correction,
+  `(raw - dark) / (flat - dark)`. Pure numpy, no optional dependency.
+  `build_reference(project)` reduces the flats/darks stacks to one
+  reference image (or, for dark, a scalar offset if the project has no
+  dark field — flats have no such fallback and raise
+  `MissingFlatFieldError` if absent) — computed once, reused across
+  calls. `normalize()` is pure broadcasting: the same function handles
+  a single sinogram, a batch of rows, or the whole volume, purely by
+  what shape of array it's given; `normalize_slice()`/`normalize_rows()`
+  are `DataInterface`-based convenience wrappers that handle the
+  row-slicing bookkeeping for whichever granularity you're working at.
+  Deliberately does **not** apply `-log()` — every real pipeline in
+  `oldscripts/` applies that right before/inside reconstruction, never
+  as part of flat/dark correction.
+- **`corrections.py`** — zinger removal and ring-artifact removal
+  (four interchangeable algorithms — sorting/filtering/fitting/
+  normalization — plus a combined "all" method), both backed by the
+  `algotom` library. Unlike `normalize()`, these can't be vectorized
+  into one broadcastable op (sorting/filtering/fitting a sinogram is
+  inherently a per-2D-array algorithm), so batching means running the
+  same single-sinogram function once per row in parallel —
+  `process_volume()` delegates that to algotom's own
+  `parallel_process_slices()`. `algotom` is deliberately **not** a
+  mandatory dependency of this project (see `pyproject.toml`'s
+  `preprocessing` extra) — every function here imports it lazily and
+  raises a plain, actionable `ImportError` if it's missing, rather than
+  this whole module failing to import for everyone.
+
+`preprocessing/`'s functions are pure: array in, array out. They don't
+write anything back onto `ProjectObject`, and deliberately so — see
+`USING_THE_PIPELINE.md` for why that's the current design, not an
+oversight.
+
 ## Data flow, end to end
 
 ```
@@ -232,6 +338,9 @@ plugin.get_path_map()       where are projections/flats/darks/angles?
 plugin.parse_metadata()     read metadata, sort into 4 tiers
   │
   ▼
+known_fields.reconcile()    catch any known field the plugin never mentioned
+  │
+  ▼
 backend.build_data_handle() × (projections, flats, darks)
   │
   ▼
@@ -239,4 +348,16 @@ ProjectObject assembled     ← this is what DataImporter.import_project() retur
   │
   ▼
 DataInterface(project)      everything downstream reads through here
+  │
+  ▼
+completion.run() / .provide()   drive mandatory_soft fields to resolved
+  │
+  ▼
+preprocessing.normalize() / remove_zinger() / remove_ring_artifacts()
+  │
+  ▼
+(calibration: center of rotation, tilt — not built yet)
+  │
+  ▼
+(reconstruction handoff — not built yet)
 ```

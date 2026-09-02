@@ -16,10 +16,16 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# Only needed for preprocessing.remove_zinger()/remove_ring_artifacts()/
+# process_volume() -- everything else in this project works without it.
+# `pip install .[preprocessing]` to get it; without it, those specific
+# functions raise a clear ImportError telling you to install this extra
+# rather than failing to import the whole package.
+preprocessing = ["algotom"]
 
 # Tells setuptools that "core" and "data_import" (and their subpackages)
 # are the importable packages in this project -- this is what makes
 # `pip install -e .` register them so `import core` / `import data_import`
 # work from anywhere: notebooks, other scripts, VSCode's interpreter, etc.
 [tool.setuptools]
-packages = ["core", "data_import", "data_import.vendors"]
+packages = ["core", "data_import", "data_import.vendors", "completion", "preprocessing"]

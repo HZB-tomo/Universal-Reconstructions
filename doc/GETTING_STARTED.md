@@ -120,5 +120,7 @@ build yourself.)
 
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — how the whole codebase fits
   together, read this next if you haven't already
+- [`USING_THE_PIPELINE.md`](./USING_THE_PIPELINE.md) — importing a
+  project and completing its metadata, in more depth than step 5 above
 - [`WRITING_A_PLUGIN.md`](./WRITING_A_PLUGIN.md) — how to add support
   for a new instrument/vendor

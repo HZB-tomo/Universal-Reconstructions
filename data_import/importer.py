@@ -33,6 +33,7 @@ from data_import.backend import Hdf5Backend, TiffBackend
 from data_import.plugin import ImportPlugin, get_plugins
 from data_import.errors import NoVendorMatchError, AmbiguousVendorMatchError, ProjectImportError
 from core.project import ProjectObject
+from core.known_fields import reconcile
 
 # One backend instance per format, shared by every import call. Backends
 # hold no per-file state of their own (they're just "how to read this
@@ -136,6 +137,14 @@ class DataImporter:
         # just paths and small metadata values (see plugin.py).
         path_map = selected_plugin.get_path_map(opened)
         metadata = selected_plugin.parse_metadata(opened, path_map)
+
+        # Step 2b: reconcile against the software's own field catalog
+        # (core/known_fields.py) -- catches any field the plugin was
+        # supposed to address but silently never mentioned at all,
+        # independent of whether the plugin remembered to declare_missing()
+        # it itself. Without this, the missing_hard() check below only
+        # ever sees what the plugin bothered to self-report.
+        reconcile(metadata)
 
         # Step 3: if any mandatory_hard field is still missing after the
         # plugin did its best, this file isn't usable -- stop here
