@@ -7,13 +7,14 @@ the other docs in this folder) will make more sense afterward.
 
 ## The big picture
 
-Four packages so far:
+Five packages so far:
 
 ```
 core/            the shared data model — every other package depends on this
 data_import/     turns a file on disk into a ProjectObject
 completion/      fills in metadata a vendor's file didn't provide
 preprocessing/   turns raw projections into reconstruction-ready sinograms
+reconstruction/  turns sinograms into reconstructed images
 ```
 
 `core/` is the foundation. It defines what a "loaded dataset" *is*
@@ -30,16 +31,23 @@ some other means entirely.
 which vendor wrote a given file, and how to read that vendor's
 metadata into the shape `core/` expects.
 
-`completion/` and `preprocessing/` are the two pipeline stages after
-import — see [`USING_THE_PIPELINE.md`](./USING_THE_PIPELINE.md) for the
-end-user walkthrough of both. Each depends only on `core/`, exactly as
-originally planned here: neither imports anything from `data_import/`,
-they just take a `ProjectObject` that already exists (from `completion/`,
-possibly already partly filled in) and work with it via `DataInterface`.
+`completion/`, `preprocessing/`, and `reconstruction/` are the pipeline
+stages after import — see [`USING_THE_PIPELINE.md`](./USING_THE_PIPELINE.md)
+for the end-user walkthrough of all three. `completion/` and
+`preprocessing/` depend only on `core/`, exactly as originally planned
+here: neither imports anything from `data_import/`, they just take a
+`ProjectObject` that already exists and work with it via `DataInterface`.
 The one-way dependency rule from the original plan held up in practice.
 
-Still to come: calibration (center of rotation, tilt) and handing a
-project off to a reconstruction engine — neither is built yet.
+`reconstruction/` is the one exception, deliberately: it doesn't depend
+on `core/` at all, or take a `ProjectObject` — see its own section
+below for why that decoupling was a real design correction, not the
+original plan.
+
+Still to come: calibration (finding center of rotation and tilt
+automatically) — not built yet. `reconstruction/` already exists, but
+without calibration you have to already know or supply the center
+yourself.
 
 ## `core/` in detail
 
@@ -317,6 +325,54 @@ write anything back onto `ProjectObject`, and deliberately so — see
 `USING_THE_PIPELINE.md` for why that's the current design, not an
 oversight.
 
+## `reconstruction/` in detail
+
+Turns normalized sinograms into reconstructed images. The one package
+that deliberately does **not** take a `ProjectObject` — `reconstruct()`
+takes plain arrays, prepared by the caller beforehand, the same way a
+caller already calls `preprocessing.normalize_rows()` itself. This
+matters specifically for calibration: a center-of-rotation search
+reconstructs many *candidate* variants of the same sinogram (each
+pre-shifted by a different trial offset — real precedent in
+`oldscripts/BAMline_recon_v0p2.py`'s `find_CoR()`), which has no
+natural "give me project row R" expression. See
+[`RECONSTRUCTION.md`](./RECONSTRUCTION.md) for the full reasoning and
+reference.
+
+- **`backend.py`** — `Geometry` (parallel/cone, field names matching
+  `core/known_fields.py`) and `ReconstructionBackend`, the plugin
+  contract: one method, `reconstruct(sinograms, angles, center, geometry,
+  device, **options)`. Registered via `@register_backend`/looked up via
+  `get_backend(name)` — the same idiom as `@register_plugin`, but
+  deliberately without a `Signature`/`matches()` equivalent, since
+  there's nothing in the data to auto-detect a reconstruction backend
+  from — selection is always explicit.
+- **`api.py`** — the public `reconstruct()`. One function, not two:
+  a single 2D sinogram in gives a single 2D image back, a 3D stack in
+  gives a matching 3D stack back. The stack's axis order is
+  deliberate: input is `(n_angles, n_slices, width)`, matching
+  `preprocessing.normalize_rows()`'s own output exactly (so its result
+  can be handed straight to `reconstruct()`, no reshaping); output is
+  `(n_slices, height, width)`, matching this codebase's own volume
+  convention instead (e.g. the phantom generator's `(height, width, width)`)
+  — different kinds of stacks, matching two different existing
+  conventions on purpose.
+- **`backends/algotom_fbp.py`** — the one built-in backend, parallel-beam
+  only, wrapping `algotom.rec.reconstruction.fbp_reconstruction` (which
+  only takes one sinogram at a time — this backend loops, unparallelized,
+  the simplest correct reference implementation, not a claim of being
+  the fastest one). Same optional-`algotom` pattern as
+  `preprocessing/corrections.py`.
+
+How a backend gets from a batch of sinograms to a batch of images —
+loop, native batch call, CPU, GPU — is entirely that backend's own
+business; the contract only specifies shapes in and out. This matters
+for genuinely different backends: a CPU-bound library benefits from
+parallelizing across independent slices, while a GPU-batch-native
+library needs its whole batch in one call to avoid paying per-slice
+transfer/launch overhead N times — see `RECONSTRUCTION.md` for the
+fuller version of this reasoning.
+
 ## Data flow, end to end
 
 ```
@@ -356,8 +412,9 @@ completion.run() / .provide()   drive mandatory_soft fields to resolved
 preprocessing.normalize() / remove_zinger() / remove_ring_artifacts()
   │
   ▼
-(calibration: center of rotation, tilt — not built yet)
+(calibration: center of rotation, tilt — not built yet;
+ for now, you supply a center yourself)
   │
   ▼
-(reconstruction handoff — not built yet)
+reconstruction.reconstruct()    sinogram(s) -> image(s), via the chosen backend
 ```

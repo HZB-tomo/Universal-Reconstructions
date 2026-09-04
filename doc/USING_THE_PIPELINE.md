@@ -6,13 +6,16 @@ instrument. If you're writing a vendor plugin instead, see
 [`WRITING_A_PLUGIN.md`](./WRITING_A_PLUGIN.md). If you want to know why
 things are built the way they are, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-The pipeline, as far as it's built today, has three stages:
+The pipeline, as far as it's built today, has four stages:
 
 ```
-import  →  completion  →  preprocessing  →  (calibration — not built yet)
+import  →  completion  →  preprocessing  →  reconstruction
 ```
 
-This document walks through all three, in order.
+Calibration (finding the center of rotation and tilt automatically)
+isn't built yet — for now, reconstruction takes a center you already
+know or supply by hand. This document walks through all four stages,
+in order.
 
 ## 1. Importing a project
 
@@ -209,9 +212,21 @@ normalize_rows(project, slice(None), reference=reference)      # the entire volu
 
 `build_reference()` raises `MissingFlatFieldError` if the project has
 no flat field data at all — there's no fallback for that. A missing
-dark field is fine: `reference.dark` becomes a scalar `0.0` instead of
-a 2D image, and the same formula works either way via plain numpy
-broadcasting.
+dark field is fine, in two different ways depending on what you
+actually know about your instrument:
+
+```python
+build_reference(project)                    # no dark data, no known offset -- dark = 0.0
+build_reference(project, dark_offset=100.0)  # no dark data, but a KNOWN constant offset
+```
+
+`dark_offset`, when given, always wins — even over real dark frames the
+project might have, if you have a specific reason to override them.
+This is for exactly the situation `oldscripts/BAMline_recon_v0p2.py`
+was in: no dark field was ever acquired for that instrument, but a
+known constant detector offset (hardcoded there as `100`) stands in for
+one. Either way, `reference.dark` ends up a plain scalar instead of a
+2D image, and the same formula works via plain numpy broadcasting.
 
 `normalize_slice()`/`normalize_rows()`/the whole-volume call all
 produce identical results for the same rows — they're the same
@@ -269,6 +284,63 @@ to find later. Two reasons this is deliberate, not unfinished:
   a GUI with multiple independent entry points, for instance. Worth
   revisiting then, not now.
 
+## 5. Reconstruction
+
+Once you have normalized sinograms, `reconstruction.reconstruct()`
+turns them into images — one slice, several, or a whole volume,
+through whichever backend you choose. Unlike every stage above, this
+one takes plain arrays, not a `ProjectObject` — you prepare whatever it
+needs beforehand, the same way you already call `normalize_rows()`
+yourself rather than something reaching into `project` on its own. See
+[`RECONSTRUCTION.md`](./RECONSTRUCTION.md) for the full reference and
+why that decoupling matters specifically for calibration; this section
+is just the everyday call.
+
+```python
+from reconstruction import Geometry, reconstruct
+
+geometry = Geometry(geometry_type=di.get_metadata("geometry_type"))
+center = width / 2   # the geometric center, until calibration can find the real one for you
+
+image = reconstruct(sinogram, project.metadata.get("angles"), center, geometry, backend="algotom_fbp")
+```
+
+Pass a single `(n_angles, width)` sinogram for one image back, or a
+stack for a matching stack of images back — no separate function:
+
+```python
+one_slice = normalize_slice(project, row=64, reference=reference)
+image = reconstruct(one_slice, angles, center, geometry, backend="algotom_fbp")           # (height, width)
+
+several = normalize_rows(project, slice(60, 70), reference=reference)
+images = reconstruct(several, angles, center, geometry, backend="algotom_fbp")            # (10, height, width)
+```
+
+`normalize_rows()`'s output shape, `(n_angles, n_slices, width)`, is
+exactly the shape `reconstruct()` expects for a stack — hand it over
+directly, no reshaping needed.
+
+**The center matters, a lot.** Reconstructing with the wrong center
+doesn't just blur the result — it produces a visibly off-axis,
+asymmetrically cropped image, sometimes with a visible seam artifact.
+See [`doc/demo/04_reconstruction.ipynb`](./demo/04_reconstruction.ipynb)
+for a direct side-by-side. Getting the right center automatically is
+calibration's job (not built yet); until then, you either already know
+it for your setup or have to find it by hand.
+
+`algotom_fbp` (the one built-in backend, parallel-beam only) needs the
+same optional `algotom` package as the ring/zinger removal above — the
+`preprocessing` extra covers both.
+
+**Units aren't optional, and there's nothing to configure.** If
+`geometry.detector_pixel_size` is set (this project always stores it
+in micrometers), the returned values are real attenuation
+coefficients in inverse micrometers (1/um). If it's `None`, they come
+back in "per pixel" units instead — usable for visual comparison
+within one dataset, but not physically meaningful across datasets with
+different pixel sizes. The result is always `float32`. See
+[`RECONSTRUCTION.md`](./RECONSTRUCTION.md)'s "Units" section for why.
+
 ## Full example
 
 ```python
@@ -276,6 +348,7 @@ from data_import.importer import DataImporter
 from core.known_fields import status
 import completion
 from preprocessing import build_reference, normalize_rows
+from reconstruction import Geometry, reconstruct
 
 importer = DataImporter()
 project = importer.import_project("my_scan.h5", format="hdf5", storage_mode="ram")
@@ -294,14 +367,27 @@ for row in status(project.metadata):
 
 reference = build_reference(project)
 normalized = normalize_rows(project, slice(None), reference)
-# ... hand `normalized` off to calibration / reconstruction, once they exist
+
+geometry = Geometry(geometry_type=project.metadata.get("geometry_type"))
+width = normalized.shape[2]
+center = width / 2  # until calibration exists, supply a known/guessed center yourself
+volume = reconstruct(normalized, project.metadata.get("angles"), center, geometry, backend="algotom_fbp")
 ```
 
 ## Where to go next
 
 - [`doc/demo/02_completion.ipynb`](./demo/02_completion.ipynb) — the
-  completion workflow above, run end-to-end against a generated example
+  completion workflow, run end-to-end against a generated example
   dataset with real output.
+- [`doc/demo/03_realistic_phantom.ipynb`](./demo/03_realistic_phantom.ipynb) —
+  generating test data with known center-of-rotation/tilt/detector
+  defects.
+- [`doc/demo/04_reconstruction.ipynb`](./demo/04_reconstruction.ipynb) —
+  the reconstruction workflow above, including the wrong-vs-correct
+  center comparison.
+- [`RECONSTRUCTION.md`](./RECONSTRUCTION.md) — the full reconstruction
+  reference: the backend contract, axis conventions, how to write a new
+  backend.
 - [`PROJECT_METADATA.md`](./PROJECT_METADATA.md) — the full field
   reference: every field's tier, resolution strategy, unit, and notes.
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — how and why the codebase is

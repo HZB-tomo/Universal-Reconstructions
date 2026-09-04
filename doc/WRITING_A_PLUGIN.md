@@ -174,4 +174,5 @@ reading a metadata sidecar file in `parse_metadata()`).
 |---|---|
 | `vendors/synthetic.py` | Simplest possible case, both hdf5 and tiff, fixed known paths |
 | `vendors/hypothetical_synchrotron.py` | A vendor that includes flats and voxel size, so `voxel_size` is read from the file rather than always declared missing |
+| `vendors/generic_parallel_synchrotron.py` | A vendor with both flats and darks, and a field (`geometry_type`) known unconditionally from the vendor's own convention rather than read per-file — paired with [`REALISTIC_PHANTOM.md`](./REALISTIC_PHANTOM.md)'s test-data generator |
 | `vendors/generic.py` | Low-specificity fallback plugins — good reference for how specificity/fallback behavior works |
