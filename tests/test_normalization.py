@@ -57,6 +57,27 @@ def test_build_reference_defaults_dark_to_scalar_zero_without_darks():
     assert not isinstance(reference.dark, np.ndarray)
 
 
+def test_build_reference_dark_offset_used_when_no_dark_frames_exist():
+    projections, flats, _ = _synthetic()
+    project = _project(projections, flats=flats)  # no darks at all
+
+    reference = build_reference(project, dark_offset=100.0)
+
+    assert reference.dark == 100.0
+    assert not isinstance(reference.dark, np.ndarray)
+
+
+def test_build_reference_dark_offset_overrides_real_dark_frames():
+    """A user-supplied dark_offset always wins, even if the project also
+    has real dark frames -- explicit beats measured, on request."""
+    projections, flats, darks = _synthetic()
+    project = _project(projections, flats=flats, darks=darks)
+
+    reference = build_reference(project, dark_offset=100.0)
+
+    assert reference.dark == 100.0
+
+
 def test_build_reference_reduces_by_mean():
     projections, flats, darks = _synthetic()
     project = _project(projections, flats=flats, darks=darks)

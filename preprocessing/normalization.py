@@ -18,7 +18,7 @@ corrections.py, which genuinely needs one).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Union
+from typing import Literal, Optional, Union
 
 import numpy as np
 
@@ -48,18 +48,29 @@ class FlatDarkReference:
     dark: Union[np.ndarray, float]  # reduced 2D image, or a scalar offset if no dark field exists
 
 
-def build_reference(project: ProjectObject, reducer: Literal["mean", "median"] = "mean") -> FlatDarkReference:
+def build_reference(
+    project: ProjectObject,
+    reducer: Literal["mean", "median"] = "mean",
+    dark_offset: Optional[float] = None,
+) -> FlatDarkReference:
     """
     Reduce this project's flat/dark stacks down to the single reference
     normalize() actually needs. Call this once per project.
 
     Flats are mandatory -- raises MissingFlatFieldError if the project
     has none, since there's no reasonable substitute for a missing flat
-    field. Darks are optional: if the project has none, `dark` becomes
-    a scalar 0.0 (no dark correction applied) rather than a 2D image --
-    real precedent for exactly this exists in oldscripts/BAMline_recon_v0p2.py,
-    which hardcodes a constant detector offset instead of a real dark
-    image throughout.
+    field. Darks are optional, with three cases, in priority order:
+
+      1. `dark_offset` given -- always wins, regardless of whether the
+         project also has real dark frames. This is for exactly the
+         oldscripts/BAMline_recon_v0p2.py situation: no dark field was
+         ever acquired, but a known constant detector offset (there,
+         hardcoded as 100) stands in for it. Pass it explicitly:
+         build_reference(project, dark_offset=100.0).
+      2. No `dark_offset`, but the project has real dark frames --
+         reduced the same way flats are.
+      3. Neither -- `dark` becomes a scalar 0.0 (no dark correction at
+         all), the same as case 1 with dark_offset=0.0.
     """
     di = DataInterface(project)
 
@@ -73,12 +84,15 @@ def build_reference(project: ProjectObject, reducer: Literal["mean", "median"] =
     reduce_fn = np.mean if reducer == "mean" else np.median
     flat = reduce_fn(flats, axis=0).astype(np.float32)
 
-    darks = di.get_darks()
     dark: Union[np.ndarray, float]
-    if darks is None:
-        dark = 0.0
+    if dark_offset is not None:
+        dark = float(dark_offset)
     else:
-        dark = reduce_fn(darks, axis=0).astype(np.float32)
+        darks = di.get_darks()
+        if darks is None:
+            dark = 0.0
+        else:
+            dark = reduce_fn(darks, axis=0).astype(np.float32)
 
     return FlatDarkReference(flat=flat, dark=dark)
 

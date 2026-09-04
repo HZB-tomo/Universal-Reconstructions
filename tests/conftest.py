@@ -18,11 +18,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import importlib
 
 from data_import.plugin import clear_registry
-from data_import.vendors import generic, synthetic, hypothetical_synchrotron  # the
-# actual modules holding @register_plugin decorators -- see the reload
-# note below. Any NEW vendor module must be added to this import line
+
+# The actual modules holding @register_plugin decorators -- see the
+# reload note below. Any NEW vendor module must be added to this import
 # AND to the reload() calls below, or it will silently stop being
 # registered after the first test that runs.
+from data_import.vendors import generic, synthetic, hypothetical_synchrotron, generic_parallel_synchrotron
 from tests.fixtures.generate_synthetic import generate
 
 
@@ -47,6 +48,7 @@ def _fresh_registry():
     importlib.reload(generic)
     importlib.reload(synthetic)
     importlib.reload(hypothetical_synchrotron)
+    importlib.reload(generic_parallel_synchrotron)
     yield
 
 
