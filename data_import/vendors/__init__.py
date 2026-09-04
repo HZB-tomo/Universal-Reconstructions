@@ -11,4 +11,5 @@ the entire process -- nothing outside this folder needs to change.
 """
 from data_import.vendors import generic  # noqa: F401
 from data_import.vendors import synthetic  # noqa: F401
-from data_import.vendors import hypothetical_synchrotron 
+from data_import.vendors import hypothetical_synchrotron  # noqa: F401
+from data_import.vendors import generic_parallel_synchrotron  # noqa: F401
