@@ -1,7 +1,8 @@
 """
 Turns a phantom volume (phantom.py) into realistic, detector-level raw
 data: parallel-beam forward projection, center-of-rotation deviation,
-detector tilt, and a simulated flat/dark-imperfect detector.
+rotation-axis tilt (axis lean), and a simulated flat/dark-imperfect
+detector.
 
 The forward model is deliberately the exact inverse of
 preprocessing.normalize()'s formula, so that running normalize() on
@@ -57,17 +58,43 @@ def project_parallel(volume: np.ndarray, angles_deg: np.ndarray) -> np.ndarray:
 
 def apply_cor_and_tilt(projections: np.ndarray, cor_deviation: float, tilt_deg: float) -> np.ndarray:
     """
-    Inject a known center-of-rotation deviation (sub-pixel lateral
-    shift, every projection) and detector tilt (in-plane rotation of
-    every projection image) -- the forward-direction equivalent of the
-    tilt-correction step in oldscripts (which rotated projections back
-    to remove tilt; this rotates them to introduce it).
+    Inject a known center-of-rotation deviation and rotation-axis tilt
+    (axis lean) into ideal line integrals.
+
+    Axis lean means the physical rotation axis isn't parallel to the
+    detector's row (height) axis, so the effective center of rotation
+    drifts linearly with row index -- a real, distinct effect from an
+    in-plane rotation of each projection frame ("detector roll"), which
+    this generator used to simulate and no longer does. That distinction
+    isn't a stylistic choice: verified directly (see
+    calibration/api.py's module docstring), a hand-built axis lean is
+    recovered by calibration.find_tilt_and_center() to within ~1% of
+    its true slope/angle, while applying the same method to a simulated
+    detector roll produced a wildly wrong answer (a real 1-degree roll
+    read back as roughly -43 degrees) -- the two are not interchangeable,
+    and calibration only ever targets axis lean (matching real reference
+    code, oldscripts/Reconstruction_algotom_loop.ipynb's own
+    find_tilt_and_center()). So this generator simulates the one thing
+    calibration actually needs to be tested against.
+
+    `tilt_deg` is expressed the same way find_tilt_and_center() reports
+    it: arctan(pixels of center-of-rotation drift per row). Every row
+    gets its own shift, `cor_deviation + tan(tilt_deg) * (row - mid_row)`
+    -- identical to a plain uniform `cor_deviation` shift when
+    `tilt_deg == 0.0`, so this is a strict generalization, not a
+    behavior change for existing tilt-free callers.
     """
-    out = projections
-    if tilt_deg:
-        out = np.stack([ndi.rotate(p, tilt_deg, reshape=False, order=1, mode="nearest") for p in out])
-    if cor_deviation:
-        out = ndi.shift(out, shift=(0, 0, cor_deviation), order=1, mode="nearest")
+    n_angles, height, width = projections.shape
+    mid_row = (height - 1) / 2.0
+    slope = np.tan(np.radians(tilt_deg))
+    shift_per_row = cor_deviation + slope * (np.arange(height) - mid_row)
+
+    out = np.empty_like(projections)
+    for row, shift_amount in enumerate(shift_per_row):
+        if shift_amount == 0.0:
+            out[:, row, :] = projections[:, row, :]
+        else:
+            out[:, row, :] = ndi.shift(projections[:, row, :], shift=(0, shift_amount), order=1, mode="nearest")
     return out.astype(np.float32)
 
 

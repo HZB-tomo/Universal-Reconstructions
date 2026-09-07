@@ -36,8 +36,9 @@ class PhantomProject:
     flat_field: np.ndarray  # simulated flat frames, (n_flats, height, width)
     dark_field: np.ndarray  # simulated dark frames, (n_darks, height, width)
     angles: np.ndarray  # degrees, shape (n_angles,)
-    true_center_of_rotation: float  # pixels, deviation from image center
-    true_tilt_angle: float  # degrees
+    true_center_of_rotation: float  # pixels, deviation from image center at the middle row
+    true_tilt_angle: float  # degrees of rotation-axis tilt (axis lean) -- see simulate.py's
+    # apply_cor_and_tilt() docstring; NOT an in-plane "detector roll" angle
     voxel_size: float
 
 

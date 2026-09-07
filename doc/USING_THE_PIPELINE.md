@@ -6,16 +6,13 @@ instrument. If you're writing a vendor plugin instead, see
 [`WRITING_A_PLUGIN.md`](./WRITING_A_PLUGIN.md). If you want to know why
 things are built the way they are, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-The pipeline, as far as it's built today, has four stages:
+The pipeline, as far as it's built today, has five stages:
 
 ```
-import  →  completion  →  preprocessing  →  reconstruction
+import  →  completion  →  preprocessing  →  calibration  →  reconstruction
 ```
 
-Calibration (finding the center of rotation and tilt automatically)
-isn't built yet — for now, reconstruction takes a center you already
-know or supply by hand. This document walks through all four stages,
-in order.
+This document walks through all five, in order.
 
 ## 1. Importing a project
 
@@ -169,8 +166,7 @@ from, and both stay missing until you supply at least one via
 `completion.provide()`. There's also no calculation of any kind for
 `center_of_rotation` or `tilt_angle` — those are `computed`-tier and
 deliberately untouched by completion; they're the job of the
-calibration stage, which comes after preprocessing (below) and doesn't
-exist yet.
+calibration stage, which comes after preprocessing (below).
 
 ## 3. Checking completion readiness
 
@@ -193,7 +189,7 @@ functions read a `ProjectObject`'s raw data but don't need its metadata
 to be fully resolved — flat/dark correction only cares about the
 `projections`/`flats`/`darks` arrays — so technically nothing stops you
 from calling this stage before completion finishes. In practice you
-still want completion done first: calibration (next, unbuilt) needs
+still want completion done first: calibration (next) needs
 `geometry_type`/`angle_span` to pick the right approach, so there's no
 reason to reorder the stages just because one function happens not to
 require it.
@@ -284,7 +280,54 @@ to find later. Two reasons this is deliberate, not unfinished:
   a GUI with multiple independent entry points, for instance. Worth
   revisiting then, not now.
 
-## 5. Reconstruction
+## 5. Calibration — finding the center of rotation and tilt
+
+Before reconstructing, you need a center of rotation — and if the
+rotation axis isn't perfectly parallel to the detector's rows, a tilt
+too. `calibration.find_tilt_and_center()` finds both together from a
+normalized projection stack:
+
+```python
+from calibration import find_tilt_and_center
+
+result = find_tilt_and_center(normalized, backend="algotom", num_rows=12, margin=4)
+result.tilt_deg   # degrees
+result.center     # center of rotation at the middle row
+```
+
+`normalized` is the same `(n_angles, n_rows, width)` array
+`normalize_rows()` already produces — hand it over directly, no
+reshaping, same convention as reconstruction below.
+
+Like `reconstruction/`, this takes plain arrays, not a `ProjectObject`,
+and `backend` is always explicit. Unlike reconstruction, it never
+reconstructs anything internally — it's pure, deterministic
+sinogram-domain math, so calling it twice on the same input always
+gives the same answer (verified directly; `reconstruction.reconstruct()`'s
+CPU-fallback path can't make that promise). See
+[`CALIBRATION.md`](./CALIBRATION.md) for the full method, the citation
+for the algorithm it wraps, and — worth reading before trusting your
+own intuition about the word "tilt" — why it specifically means
+*rotation-axis tilt*, not an in-plane rotation of the detector; those
+are different physical effects with different fixes, confirmed
+directly, not assumed.
+
+Once you have a center (and, if nonzero, a tilt), turn the tilt into a
+per-row center array for reconstruction — no separate correction step
+needed:
+
+```python
+import numpy as np
+
+n_rows = normalized.shape[1]
+slope = np.tan(np.radians(result.tilt_deg))
+centers = result.center + slope * (np.arange(n_rows) - (n_rows - 1) / 2.0)
+```
+
+`reconstruct()` already accepts one center per slice (see below), so
+this array is all reconstruction needs to account for the tilt.
+
+## 6. Reconstruction
 
 Once you have normalized sinograms, `reconstruction.reconstruct()`
 turns them into images — one slice, several, or a whole volume,
@@ -300,7 +343,7 @@ is just the everyday call.
 from reconstruction import Geometry, reconstruct
 
 geometry = Geometry(geometry_type=di.get_metadata("geometry_type"))
-center = width / 2   # the geometric center, until calibration can find the real one for you
+center = calibrated.center   # from calibration.find_tilt_and_center() -- see section 5 above
 
 image = reconstruct(sinogram, project.metadata.get("angles"), center, geometry, backend="algotom_fbp")
 ```
@@ -324,9 +367,11 @@ directly, no reshaping needed.
 doesn't just blur the result — it produces a visibly off-axis,
 asymmetrically cropped image, sometimes with a visible seam artifact.
 See [`doc/demo/04_reconstruction.ipynb`](./demo/04_reconstruction.ipynb)
-for a direct side-by-side. Getting the right center automatically is
-calibration's job (not built yet); until then, you either already know
-it for your setup or have to find it by hand.
+for a direct side-by-side. `calibration.find_tilt_and_center()` (section
+5 above) finds it automatically; if it's ever unreliable for your
+setup, a manual visual check — reconstruct a range of candidate centers
+and look at them — is just a direct call to `reconstruct()` with an
+array of trial centers, no separate tool needed.
 
 `algotom_fbp` (the one built-in backend, parallel-beam only) needs the
 same optional `algotom` package as the ring/zinger removal above — the
@@ -348,6 +393,7 @@ from data_import.importer import DataImporter
 from core.known_fields import status
 import completion
 from preprocessing import build_reference, normalize_rows
+from calibration import find_tilt_and_center
 from reconstruction import Geometry, reconstruct
 
 importer = DataImporter()
@@ -369,9 +415,8 @@ reference = build_reference(project)
 normalized = normalize_rows(project, slice(None), reference)
 
 geometry = Geometry(geometry_type=project.metadata.get("geometry_type"))
-width = normalized.shape[2]
-center = width / 2  # until calibration exists, supply a known/guessed center yourself
-volume = reconstruct(normalized, project.metadata.get("angles"), center, geometry, backend="algotom_fbp")
+calibrated = find_tilt_and_center(normalized, backend="algotom", num_rows=12, margin=4)
+volume = reconstruct(normalized, project.metadata.get("angles"), calibrated.center, geometry, backend="algotom_fbp")
 ```
 
 ## Where to go next
@@ -385,6 +430,10 @@ volume = reconstruct(normalized, project.metadata.get("angles"), center, geometr
 - [`doc/demo/04_reconstruction.ipynb`](./demo/04_reconstruction.ipynb) —
   the reconstruction workflow above, including the wrong-vs-correct
   center comparison.
+- [`CALIBRATION.md`](./CALIBRATION.md) — the full calibration
+  reference: the backend contract, the method behind
+  `find_tilt_and_center()`, and why it targets rotation-axis tilt
+  specifically, not detector roll.
 - [`RECONSTRUCTION.md`](./RECONSTRUCTION.md) — the full reconstruction
   reference: the backend contract, axis conventions, how to write a new
   backend.

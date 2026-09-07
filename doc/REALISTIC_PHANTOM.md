@@ -2,12 +2,12 @@
 
 `tests/fixtures/realistic_phantom/` is a standalone CT data simulator:
 a Shepp-Logan phantom projected through a simulated imperfect detector,
-with center-of-rotation deviation, tilt, flat/dark-field defects, and
-noise all controllable and all with a known ground truth. It exists to
-test the rest of the pipeline — normalization, ring removal, and
-(later) center-of-rotation finding, tilt correction, and reconstruction
-— against data that actually has the problems those stages are meant
-to fix, not just a geometrically perfect toy volume.
+with center-of-rotation deviation, rotation-axis tilt, flat/dark-field
+defects, and noise all controllable and all with a known ground truth.
+It exists to test the rest of the pipeline — normalization, ring
+removal, calibration, and reconstruction — against data that actually
+has the problems those stages are meant to fix, not just a
+geometrically perfect toy volume.
 
 It's independent of the rest of the project: only `numpy`/`scipy` for
 the simulation, `h5py` only inside `write_hdf5()` (imported lazily,
@@ -58,8 +58,8 @@ That's the actual physical cause, not a shortcut.
 |---|---|
 | `shape` | `(height, width, width)` of the volume/detector |
 | `n_angles`, `n_flats`, `n_darks` | how many of each frame to generate |
-| `cor_deviation` | center-of-rotation offset, pixels (sub-pixel, applied as a shift) |
-| `tilt_deg` | detector/rotation-axis tilt, degrees (applied as an in-plane rotation) |
+| `cor_deviation` | center-of-rotation offset at the middle row, pixels (sub-pixel, applied as a shift) |
+| `tilt_deg` | rotation-axis tilt (axis lean), degrees -- the effective center drifts linearly with row; see `simulate.py`'s `apply_cor_and_tilt()` docstring for why this, not an in-plane "detector roll," is what's simulated |
 | `attenuation_scale` | converts the phantom's unitless density into optical depth |
 | `flat_intensity` | nominal flat-field brightness |
 | `dark_level` | nominal dark-field offset |

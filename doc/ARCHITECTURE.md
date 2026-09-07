@@ -7,13 +7,14 @@ the other docs in this folder) will make more sense afterward.
 
 ## The big picture
 
-Five packages so far:
+Six packages so far:
 
 ```
 core/            the shared data model — every other package depends on this
 data_import/     turns a file on disk into a ProjectObject
 completion/      fills in metadata a vendor's file didn't provide
 preprocessing/   turns raw projections into reconstruction-ready sinograms
+calibration/     finds center-of-rotation and rotation-axis tilt
 reconstruction/  turns sinograms into reconstructed images
 ```
 
@@ -31,23 +32,21 @@ some other means entirely.
 which vendor wrote a given file, and how to read that vendor's
 metadata into the shape `core/` expects.
 
-`completion/`, `preprocessing/`, and `reconstruction/` are the pipeline
-stages after import — see [`USING_THE_PIPELINE.md`](./USING_THE_PIPELINE.md)
-for the end-user walkthrough of all three. `completion/` and
-`preprocessing/` depend only on `core/`, exactly as originally planned
-here: neither imports anything from `data_import/`, they just take a
-`ProjectObject` that already exists and work with it via `DataInterface`.
-The one-way dependency rule from the original plan held up in practice.
+`completion/`, `preprocessing/`, `calibration/`, and `reconstruction/`
+are the pipeline stages after import — see
+[`USING_THE_PIPELINE.md`](./USING_THE_PIPELINE.md) for the end-user
+walkthrough of all four. `completion/` and `preprocessing/` depend only
+on `core/`, exactly as originally planned here: neither imports
+anything from `data_import/`, they just take a `ProjectObject` that
+already exists and work with it via `DataInterface`. The one-way
+dependency rule from the original plan held up in practice.
 
-`reconstruction/` is the one exception, deliberately: it doesn't depend
-on `core/` at all, or take a `ProjectObject` — see its own section
-below for why that decoupling was a real design correction, not the
-original plan.
-
-Still to come: calibration (finding center of rotation and tilt
-automatically) — not built yet. `reconstruction/` already exists, but
-without calibration you have to already know or supply the center
-yourself.
+`calibration/` and `reconstruction/` are the exception, deliberately:
+neither depends on `core/` at all, or takes a `ProjectObject` — see
+`reconstruction/`'s own section below for why that decoupling was a
+real design correction, not the original plan; `calibration/` was built
+the same way from the start, for the same reason (see
+[`CALIBRATION.md`](./CALIBRATION.md)).
 
 ## `core/` in detail
 
@@ -283,8 +282,8 @@ projection count + `rotation_direction`), `detector_pixel_size` (from
 mirroring `@register_plugin`.
 
 `completion/` never touches `computed`-tier fields (`center_of_rotation`,
-`tilt_angle`) — those are calibration's job, a stage that doesn't exist
-yet.
+`tilt_angle`) — those are `calibration/`'s job (see below), not something
+completion derives or asks the user for.
 
 ## `preprocessing/` in detail
 
@@ -325,19 +324,44 @@ write anything back onto `ProjectObject`, and deliberately so — see
 `USING_THE_PIPELINE.md` for why that's the current design, not an
 oversight.
 
+## `calibration/` in detail
+
+Finds center-of-rotation and rotation-axis tilt from normalized
+projections. Structured exactly like `reconstruction/` (below), on
+purpose: `backend.py` (`CalibrationBackend`, one method —
+`find_center()` — plus the same `register_backend`/`get_backend`
+registry idiom), `backends/algotom_cor.py` (the one built-in backend),
+`api.py` (`find_center()`/`find_tilt_and_center()`, the backend-agnostic
+orchestration). If `algotom` is ever unavailable, a from-scratch
+reimplementation of the published algorithm it wraps only has to
+satisfy that one method to slot in — see
+[`CALIBRATION.md`](./CALIBRATION.md).
+
+Doesn't take a `ProjectObject` either, for the same reason as
+`reconstruction/`: the caller prepares whatever normalized data it
+needs beforehand. `find_tilt_and_center()` never reconstructs anything
+— it's pure, deterministic sinogram-domain math (independent
+per-row `find_center()` calls plus a line fit) — which turned out to
+matter a lot in practice: `reconstruction.reconstruct()`'s CPU-fallback
+FBP path was verified to NOT be bit-reproducible between identical
+calls, which rules out any calibration design based on reconstructing
+candidates and scoring them automatically. See `CALIBRATION.md`'s
+"Why this method, and not a reconstruction-quality search" section for
+the full story, including what *is* still a good use for
+`reconstruct()` here (a manual/visual center check with no automatic
+scoring at all).
+
 ## `reconstruction/` in detail
 
-Turns normalized sinograms into reconstructed images. The one package
-that deliberately does **not** take a `ProjectObject` — `reconstruct()`
-takes plain arrays, prepared by the caller beforehand, the same way a
-caller already calls `preprocessing.normalize_rows()` itself. This
-matters specifically for calibration: a center-of-rotation search
-reconstructs many *candidate* variants of the same sinogram (each
-pre-shifted by a different trial offset — real precedent in
-`oldscripts/BAMline_recon_v0p2.py`'s `find_CoR()`), which has no
-natural "give me project row R" expression. See
-[`RECONSTRUCTION.md`](./RECONSTRUCTION.md) for the full reasoning and
-reference.
+Turns normalized sinograms into reconstructed images. Doesn't take a
+`ProjectObject` — `reconstruct()` takes plain arrays, prepared by the
+caller beforehand, the same way a caller already calls
+`preprocessing.normalize_rows()` itself. This still matters for a
+manual/visual calibration check (reconstruct several candidate centers
+at once — `reconstruct()`'s stack-plus-per-slice-center support handles
+this natively — and look at them), even though the automatic
+`calibration/` module ended up not needing it (see above). See
+[`RECONSTRUCTION.md`](./RECONSTRUCTION.md) for the full reasoning.
 
 - **`backend.py`** — `Geometry` (parallel/cone, field names matching
   `core/known_fields.py`) and `ReconstructionBackend`, the plugin
@@ -412,8 +436,7 @@ completion.run() / .provide()   drive mandatory_soft fields to resolved
 preprocessing.normalize() / remove_zinger() / remove_ring_artifacts()
   │
   ▼
-(calibration: center of rotation, tilt — not built yet;
- for now, you supply a center yourself)
+calibration.find_tilt_and_center()   normalized projections -> (tilt_deg, center)
   │
   ▼
 reconstruction.reconstruct()    sinogram(s) -> image(s), via the chosen backend
