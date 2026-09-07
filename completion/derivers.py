@@ -1,17 +1,10 @@
 """
-The built-in derive functions for completion's "derive" strategy
-fields -- the field-specific knowledge that completion/engine.py's
-generic run() loop doesn't (and shouldn't) contain. Importing this
-module registers all of them via @register_deriver; see
-completion/__init__.py, which imports this module for exactly that
-side effect (same pattern as data_import/vendors/__init__.py importing
-each vendor module to trigger their @register_plugin decorators).
+Built-in derive functions for completion's "derive" strategy fields.
+Importing this module registers each via @register_deriver.
 
-Each deriver returns None if it can't compute a value yet (an input it
-needs is itself still missing) -- run()'s repeat-until-no-progress loop
-means a deriver that returns None this pass just gets retried on a
-later pass, or a later call to run()/provide(), once its inputs become
-available.
+A deriver returns None if it cannot compute a value yet (an input it
+needs is itself still missing); run()'s repeat-until-no-progress loop
+retries it on a later pass.
 """
 from __future__ import annotations
 
@@ -26,7 +19,7 @@ from core.project import ProjectObject
 
 @register_deriver("angle_span")
 def derive_angle_span(project: ProjectObject) -> Optional[float]:
-    """angle_span from angles (max - min), when angles are already known directly."""
+    """angle_span from angles (max - min), when angles are already known."""
     angles = project.metadata.get("angles")
     if angles is None:
         return None
@@ -39,28 +32,20 @@ def derive_angle_span(project: ProjectObject) -> Optional[float]:
 @register_deriver("angles")
 def derive_angles(project: ProjectObject) -> Optional[np.ndarray]:
     """
-    angles from angle_span + projection count + rotation_direction.
-    Projection count comes from the actual data shape, never a
-    separately-tracked metadata field (see core/known_fields.py's
-    "angles" entry). Evenly spaced from 0, matching the convention
-    already used by tests/fixtures/generate_synthetic.py and
-    tests/fixtures/generate_hypothetical_synchrotron.py
+    angles from angle_span, projection count, and rotation_direction.
+    Projection count comes from the data shape, not a separate
+    metadata field. Evenly spaced from 0
     (np.linspace(0, span, n, endpoint=False)).
 
     rotation_direction=="cw" negates the sequence rather than reversing
-    it -- the standard math convention (positive angle = counterclockwise),
-    consistent with rotation_direction's own note in core/known_fields.py
-    that a wrong choice here only flips orientation, never invalidates
-    the reconstruction. This is a judgment call in the absence of a
-    stronger convention elsewhere in the codebase -- revisit if it
-    turns out to disagree with what the reconstruction stage expects.
+    it: positive angle is counterclockwise.
     """
     angle_span = project.metadata.get("angle_span")
     if angle_span is None:
         return None
     direction = project.metadata.get("rotation_direction")
     if direction is None:
-        return None  # rotation_direction hasn't gotten its default yet this pass -- retry later
+        return None  # rotation_direction hasn't received its default yet this pass
 
     n_projections = DataInterface(project).shape_of("projections")[0]
     values = np.linspace(0.0, float(angle_span), n_projections, endpoint=False)
@@ -69,11 +54,6 @@ def derive_angles(project: ProjectObject) -> Optional[np.ndarray]:
 
 @register_deriver("detector_pixel_size")
 def derive_detector_pixel_size(project: ProjectObject) -> Optional[float]:
-    """
-    detector_pixel_size from voxel_size -- see core/known_fields.py's
-    "detector_pixel_size" entry: only meaningfully distinct from
-    voxel_size in cone-beam (magnification), so voxel_size is a
-    reasonable stand-in until a real per-vendor magnification
-    calculation is needed.
-    """
+    """detector_pixel_size from voxel_size. Distinct from voxel_size
+    only in cone-beam (magnification)."""
     return project.metadata.get("voxel_size")

@@ -1,25 +1,17 @@
 """
-preprocessing/ turns a completion-ready ProjectObject's raw projections
-into reconstruction-ready sinograms: flat/dark correction first, then
-whatever artifact removal the data needs, all still upstream of any
--log() (that belongs to reconstruction, not here -- see
-normalization.py's module docstring for why).
+Turns a completion-ready ProjectObject's raw projections into
+reconstruction-ready sinograms: flat/dark correction first, then
+artifact removal. Does not apply -log(); that happens at or inside
+reconstruction.
 
-Two files, two different kinds of dependency:
+  normalization.py   flat/dark correction. Pure numpy, no optional
+                      dependency.
+  corrections.py     zinger/ring-artifact removal. Requires the
+                      optional `algotom` package; raises ImportError
+                      with an install hint if it is missing.
 
-  normalization.py   flat/dark correction -- pure numpy, no optional
-                      dependency, always available.
-  corrections.py     zinger/ring-artifact removal -- needs the
-                      `algotom` package, which is deliberately NOT a
-                      mandatory dependency of this project (see
-                      corrections.py's module docstring). Calling a
-                      function here without algotom installed raises a
-                      clear ImportError telling you what to install,
-                      rather than this whole package failing to import.
-
-Both operate at the same granularity: one sinogram (a fixed detector
-row, every angle), a batch of rows, or the whole volume -- see each
-module for how that's handled.
+Both operate on a single sinogram (one detector row, every angle), a
+batch of rows, or the whole volume.
 """
 from preprocessing.corrections import process_volume, remove_ring_artifacts, remove_zinger
 from preprocessing.normalization import (

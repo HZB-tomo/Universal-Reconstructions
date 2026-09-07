@@ -1,22 +1,12 @@
 """
-Parallel-beam FBP via algotom.rec.reconstruction.fbp_reconstruction --
-the first, reference reconstruction backend. Needs the `algotom`
-package, the same optional dependency preprocessing/corrections.py
-already uses -- imported lazily, with a plain ImportError telling you
-what to install if it's missing, never a mandatory dependency of this
-project.
+Parallel-beam FBP reconstruction backend wrapping
+algotom.rec.reconstruction.fbp_reconstruction.
 
-algotom's fbp_reconstruction() takes exactly one sinogram at a time --
-see reconstruction/backend.py's ReconstructionBackend.reconstruct()
-docstring for why the contract still only asks for one method. This
-implementation loops over the requested stack, one call per sinogram.
-That's deliberately NOT parallelized (no joblib, no GPU batching) --
-it's the simplest correct reference implementation, not a claim that
-it's the fastest one possible. A future revision of this backend, or a
-different one entirely (raw ASTRA, tomopy, a GPU-batch-native library),
-is exactly where genuine batch/parallel performance work belongs --
-nothing about the contract needs to change for that, only this method's
-body.
+Requires the optional `algotom` package, imported lazily. Raises
+ImportError with install instructions if it is not installed.
+
+algotom's fbp_reconstruction() reconstructs one sinogram at a time;
+this backend loops over the requested stack.
 """
 from __future__ import annotations
 
@@ -54,20 +44,14 @@ class AlgotomFbpBackend(ReconstructionBackend):
     ) -> np.ndarray:
         rec = _algotom_reconstruction()
 
-        # algotom's own default is gpu=True; device=None means "use
-        # this backend's default" per the contract, so only override
-        # when the caller actually asked for one explicitly.
         gpu = True if device is None else (device == "gpu")
 
         angles_rad = np.radians(angles)
-        n_slices = sinograms.shape[1]  # sinograms is (n_angles, n_slices, n_columns) -- see backend.py
+        n_slices = sinograms.shape[1]
         centers = np.broadcast_to(np.asarray(center, dtype=float), (n_slices,))
 
         images = [
             rec.fbp_reconstruction(sinograms[:, i, :], float(centers[i]), angles=angles_rad, gpu=gpu, **options)
             for i in range(n_slices)
         ]
-        # "per pixel" attenuation values, float32 -- api.reconstruct() handles
-        # unit conversion (1/detector_pixel_size) and the final dtype
-        # guarantee centrally, so this backend doesn't need to repeat either.
         return np.stack(images)

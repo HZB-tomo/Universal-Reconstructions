@@ -1,24 +1,14 @@
 """
-This file solves one specific problem: the rest of the software wants to
-say "give me the projections array" without caring whether that array is
-sitting in RAM as a plain numpy array, or still living on disk inside an
-open HDF5 file and only read when actually needed.
+DataHandle: a thin wrapper around either an in-memory numpy array or a
+still-open HDF5 dataset, exposing the same interface (`.get()`,
+`.shape`, `.storage_mode`) regardless of which.
 
-We solve it with a small class hierarchy called "handles". A handle is a
-thin wrapper around either kind of storage that exposes the SAME interface
-(`.get()`, `.shape`, `.storage_mode`) regardless of what's underneath.
+ProjectObject stores these instead of raw arrays, so it stays cheap to
+create and inspect even when the underlying data is large.
 
-Why this matters for the project structure: ProjectObject (see project.py)
-stores these handles instead of raw arrays. That keeps ProjectObject
-cheap to create, inspect, and eventually serialize (e.g. dump as JSON for
-reproducibility) even when the underlying data is tens of gigabytes --
-because ProjectObject itself never holds the actual array, just a
-reference to where it lives.
-
-Note: per our decision, TIFF data is ALWAYS loaded fully into RAM at
-import time. So TiffBackend only ever produces RamHandle. Only HDF5 can
-produce the disk-backed variant, because only HDF5 supports leaving data
-on disk and reading slices from it lazily via h5py.
+TIFF data is always loaded fully into RAM at import time, so
+TiffBackend only ever produces RamHandle. Only HDF5 can produce the
+disk-backed variant.
 """
 from __future__ import annotations
 
@@ -28,44 +18,30 @@ import numpy as np
 
 
 class DataHandle(ABC):
-    """
-    Common interface every handle must implement. Nothing outside this
-    file should ever check "is this a RamHandle or a disk handle?" --
-    if calling code needs to branch on that, it's a sign the interface
-    here is missing something, and we should add a method instead.
-    """
+    """Common interface every handle implements."""
 
     @abstractmethod
     def get(self, index=None) -> np.ndarray:
         """
         Return the array data. If `index` is None, return the whole
-        array. Otherwise `index` is passed straight through to numpy-style
-        indexing (a slice, an integer, a tuple of slices, etc.), so
-        callers can request e.g. just one projection image instead of
-        the whole stack.
+        array; otherwise `index` is passed through to numpy-style
+        indexing.
         """
 
     @property
     @abstractmethod
     def shape(self) -> tuple:
-        """The array's shape, without necessarily loading the whole
-        array into memory to find out (h5py datasets expose .shape
-        cheaply, without reading any data)."""
+        """The array's shape, without necessarily loading it into
+        memory (h5py datasets expose .shape without reading data)."""
 
     @property
     @abstractmethod
     def storage_mode(self) -> str:
-        """Either "ram" or "disk" -- mainly useful for logging/debugging
-        and for ProjectObject.storage_mode to stay in sync with what its
-        handles are actually doing."""
+        """Either "ram" or "disk"."""
 
 
 class RamHandle(DataHandle):
-    """
-    The simple case: the array is already a plain numpy array sitting in
-    memory. This is what TIFF data always becomes (per our decision),
-    and what HDF5 data becomes when the user chooses storage_mode="ram".
-    """
+    """Wraps a plain numpy array already in memory."""
 
     def __init__(self, array: np.ndarray):
         self._array = array
@@ -84,23 +60,19 @@ class RamHandle(DataHandle):
 
 class Hdf5DiskHandle(DataHandle):
     """
-    The lazy case: wraps a live h5py.Dataset instead of a numpy array.
-    Reading `.get()` triggers an actual disk read at that moment -- the
-    data is NOT loaded until something asks for it.
+    Wraps a live h5py.Dataset. `.get()` triggers a disk read at that
+    moment; data is not loaded until requested.
 
-    Important: this only works as long as the underlying h5py.File stays
-    open. ProjectObject is responsible for keeping a reference to that
-    open file alive for as long as any Hdf5DiskHandle from it exists
-    (see ProjectObject._open_resource in project.py) -- otherwise you'd
-    get an error trying to read from a closed file.
+    Requires the underlying h5py.File to stay open. ProjectObject keeps
+    a reference to that open file alive for as long as any
+    Hdf5DiskHandle from it exists (see ProjectObject._open_resource in
+    project.py).
     """
 
     def __init__(self, dataset):
         self._dataset = dataset
 
     def get(self, index=None) -> np.ndarray:
-        # h5py's own indexing rule: dataset[()] reads everything,
-        # dataset[some_slice] reads only that slice from disk.
         return self._dataset[()] if index is None else self._dataset[index]
 
     @property
@@ -113,10 +85,8 @@ class Hdf5DiskHandle(DataHandle):
 
     def materialize(self) -> RamHandle:
         """
-        Read the ENTIRE dataset into memory right now and return it as a
-        RamHandle. This is how a user switches a project from disk mode
-        to RAM mode mid-pipeline (see DataInterface.materialize_to_ram
-        in data_interface.py) -- it's a one-way, explicit, on-demand
-        conversion, never automatic.
+        Read the entire dataset into memory and return it as a
+        RamHandle. Explicit, one-way conversion; see
+        DataInterface.materialize_to_ram().
         """
         return RamHandle(self._dataset[()])

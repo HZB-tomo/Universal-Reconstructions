@@ -1,19 +1,11 @@
 """
-Flat/dark-field correction: turning a raw detector reading into a
+Flat/dark-field correction: turns a raw detector reading into a
 transmission ratio, (raw - dark) / (flat - dark). This is the first
-step of preprocessing -- everything else (zinger removal, ring
-removal, ...) runs on its output.
+step of preprocessing; zinger and ring removal run on its output.
 
-Deliberately does NOT apply -log() here. Every real pipeline we checked
-(see oldscripts/ -- BAMline_recon_v0p2.py, full_reconstruction_cli.py,
-Reconstruction_algotom_loop.ipynb, Recon_algotom.py) applies -log()
-right before/inside reconstruction, never as part of flat/dark
-correction -- ring removal and phase retrieval both run on the
-non-logged transmission data these functions produce.
+Does not apply -log() here; that happens at or inside reconstruction.
 
-No optional dependency here -- the math is simple enough that it would
-be silly to require an external package just for this (unlike
-corrections.py, which genuinely needs one).
+No optional dependency: the math is plain numpy.
 """
 from __future__ import annotations
 
@@ -27,21 +19,14 @@ from core.project import ProjectObject
 
 
 class MissingFlatFieldError(Exception):
-    """
-    Raised when there's no flat field data to normalize against. Unlike
-    a missing dark field (which has a reasonable fallback -- see
-    build_reference()), there's no substitute for a missing flat field,
-    so this is a hard stop rather than a default.
-    """
+    """Raised when a project has no flat field data."""
 
 
 @dataclass
 class FlatDarkReference:
     """
-    The reduced flat/dark reference for one project, computed once by
-    build_reference() and reused across every normalize() call --
-    recomputing the mean of the flats stack on every single-slice call
-    would redo the same work over and over for no reason.
+    Reduced flat/dark reference for one project, computed once by
+    build_reference() and reused across normalize() calls.
     """
 
     flat: np.ndarray  # reduced 2D image, shape (height, width)
@@ -54,23 +39,16 @@ def build_reference(
     dark_offset: Optional[float] = None,
 ) -> FlatDarkReference:
     """
-    Reduce this project's flat/dark stacks down to the single reference
-    normalize() actually needs. Call this once per project.
+    Reduce a project's flat/dark stacks to the reference normalize()
+    needs. Call once per project.
 
-    Flats are mandatory -- raises MissingFlatFieldError if the project
-    has none, since there's no reasonable substitute for a missing flat
-    field. Darks are optional, with three cases, in priority order:
+    Raises MissingFlatFieldError if the project has no flat field data.
 
-      1. `dark_offset` given -- always wins, regardless of whether the
-         project also has real dark frames. This is for exactly the
-         oldscripts/BAMline_recon_v0p2.py situation: no dark field was
-         ever acquired, but a known constant detector offset (there,
-         hardcoded as 100) stands in for it. Pass it explicitly:
-         build_reference(project, dark_offset=100.0).
-      2. No `dark_offset`, but the project has real dark frames --
-         reduced the same way flats are.
-      3. Neither -- `dark` becomes a scalar 0.0 (no dark correction at
-         all), the same as case 1 with dark_offset=0.0.
+    Dark field resolution, in priority order:
+      1. `dark_offset`, if given, is used regardless of whether the
+         project has real dark frames: build_reference(project, dark_offset=100.0).
+      2. Otherwise, real dark frames are reduced the same way flats are.
+      3. Otherwise, `dark` is 0.0.
     """
     di = DataInterface(project)
 
@@ -99,28 +77,26 @@ def build_reference(
 
 def normalize(raw: np.ndarray, reference: FlatDarkReference) -> np.ndarray:
     """
-    The actual formula: (raw - dark) / (flat - dark). Pure numpy
-    broadcasting, nothing shape-specific about it -- `raw` can be a
-    single sinogram (n_angles, width), a batch of rows
-    (n_angles, batch, width), or the whole volume
-    (n_angles, height, width), as long as `reference.flat`/`.dark` are
-    already sliced to match (see normalize_slice()/normalize_rows()
-    below, which handle that bookkeeping for you via DataInterface).
+    Apply (raw - dark) / (flat - dark). `raw` may be a single sinogram
+    (n_angles, width), a batch of rows (n_angles, batch, width), or a
+    full volume (n_angles, height, width), as long as
+    `reference.flat`/`.dark` are already sliced to match; see
+    normalize_slice()/normalize_rows() below.
 
-    Casts to float32 first: raw detector data is often an unsigned
-    integer type, and (raw - dark) needs to be able to go negative.
+    Casts to float32 first, since raw detector data is often an
+    unsigned integer type and (raw - dark) can go negative.
     """
     raw = raw.astype(np.float32, copy=False)
     return (raw - reference.dark) / (reference.flat - reference.dark)
 
 
 def _dark_rows(dark: Union[np.ndarray, float], rows):
-    """Slice `dark` to match `rows`, unless it's just a scalar offset (no per-pixel indexing to do)."""
+    """Slice `dark` to match `rows`, unless it is a scalar offset."""
     return dark[rows] if isinstance(dark, np.ndarray) else dark
 
 
 def normalize_slice(project: ProjectObject, row: int, reference: FlatDarkReference) -> np.ndarray:
-    """Normalize a single sinogram -- detector row `row`, every angle."""
+    """Normalize a single sinogram: detector row `row`, every angle."""
     di = DataInterface(project)
     raw = di.get_projections(index=(slice(None), row, slice(None)))
     row_reference = FlatDarkReference(flat=reference.flat[row], dark=_dark_rows(reference.dark, row))
@@ -129,11 +105,11 @@ def normalize_slice(project: ProjectObject, row: int, reference: FlatDarkReferen
 
 def normalize_rows(project: ProjectObject, rows, reference: FlatDarkReference) -> np.ndarray:
     """
-    Normalize a batch of rows at once -- `rows` is anything valid for
-    numpy indexing along the row axis (a slice, a list of indices, ...).
-    Pass `rows=slice(None)` for the entire volume in one call; pass a
-    single int to normalize_slice() instead for one sinogram, since
-    slicing with an int vs. a length-1 slice changes the output shape.
+    Normalize a batch of rows at once. `rows` is anything valid for
+    numpy indexing along the row axis (a slice, a list of indices,
+    etc.). Use `rows=slice(None)` for the entire volume; use
+    normalize_slice() for a single row, since indexing with an int
+    versus a length-1 slice changes the output shape.
     """
     di = DataInterface(project)
     raw = di.get_projections(index=(slice(None), rows, slice(None)))

@@ -1,12 +1,7 @@
 """
-Defines PathMap: a small, plain data holder for "where things are" in
-one specific file/folder, as figured out by a vendor plugin.
-
-Why this is its own tiny file rather than folded into plugin.py: both
-plugin.py (which produces PathMap objects) and backend.py (which
-consumes them to actually build data handles) need to import it, and
-keeping it separate avoids plugin.py and backend.py needing to import
-from each other.
+PathMap: a plain data holder for where things are in one file/folder,
+as determined by a vendor plugin. Both plugin.py (produces PathMap
+objects) and backend.py (consumes them) import this module.
 """
 from __future__ import annotations
 
@@ -32,11 +27,7 @@ class PathMap:
     darks: Optional[str] = None
     angles: Optional[str] = None
     # Where the plugin found metadata (e.g. a sidecar "metadata.json"
-    # path, or an hdf5 group). Not always used -- some vendors keep
-    # metadata as hdf5 attributes rather than a separate location.
+    # path, or an hdf5 group).
     metadata_source: Optional[str] = None
-    # Escape hatch for anything vendor-specific that doesn't fit the
-    # fields above (e.g. a second sidecar file, a calibration path).
-    # Deliberately a free-form dict rather than trying to anticipate
-    # every possible vendor quirk up front.
+    # Vendor-specific extras that do not fit the fields above.
     extra: dict = field(default_factory=dict)

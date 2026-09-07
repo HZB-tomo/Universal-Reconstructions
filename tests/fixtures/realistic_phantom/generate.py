@@ -1,9 +1,7 @@
 """
 Ties phantom.py and simulate.py together into one entry point, and
-offers two separate ways to get the result into something the rest of
-the package understands -- see the module docstring in __init__.py and
-doc/REALISTIC_PHANTOM.md for why these are kept as three distinct
-functions instead of one that does everything.
+offers two ways to get the result into a form the rest of the package
+understands.
 """
 from __future__ import annotations
 
@@ -23,12 +21,10 @@ from tests.fixtures.realistic_phantom.simulate import (
 @dataclass
 class PhantomProject:
     """
-    Everything one simulated run produced -- purely in memory, no file
-    involved. Carries the ground truth (`volume`, `true_center_of_rotation`,
-    `true_tilt_angle`) that a real import could never have, alongside the
-    same shape of data (projections/flats/darks/angles) a real one would
-    produce -- exactly what makes this useful for checking a later
-    calibration or reconstruction result against a known answer.
+    One simulated run's output, entirely in memory. Carries ground
+    truth (`volume`, `true_center_of_rotation`, `true_tilt_angle`)
+    alongside the same shape of data (projections/flats/darks/angles) a
+    real import would produce.
     """
 
     volume: np.ndarray  # ground-truth object, shape (height, width, width)
@@ -37,8 +33,7 @@ class PhantomProject:
     dark_field: np.ndarray  # simulated dark frames, (n_darks, height, width)
     angles: np.ndarray  # degrees, shape (n_angles,)
     true_center_of_rotation: float  # pixels, deviation from image center at the middle row
-    true_tilt_angle: float  # degrees of rotation-axis tilt (axis lean) -- see simulate.py's
-    # apply_cor_and_tilt() docstring; NOT an in-plane "detector roll" angle
+    true_tilt_angle: float  # degrees of rotation-axis tilt (axis lean)
     voxel_size: float
 
 
@@ -61,15 +56,13 @@ def generate(
     seed: int | None = None,
 ) -> PhantomProject:
     """
-    Simulate one realistic CT acquisition. Pure computation, no file
-    I/O -- see write_hdf5()/to_project_object() for the two ways to get
-    this into something the rest of the package can use. All defaults
-    produce a small, fast, deterministic (noise_level=0.0) dataset
-    suitable for quick tests; increase `shape`/`n_angles` for something
-    closer to a real acquisition.
+    Simulate one CT acquisition. Pure computation, no file I/O; see
+    write_hdf5()/to_project_object() for the two ways to consume the
+    result. Defaults produce a small, deterministic (noise_level=0.0)
+    dataset for quick tests.
 
-    See doc/REALISTIC_PHANTOM.md for what every parameter controls
-    physically and simulate.py's module docstring for the forward model.
+    See doc/REALISTIC_PHANTOM.md for what each parameter controls, and
+    simulate.py's module docstring for the forward model.
     """
     rng = np.random.default_rng(seed)
 
@@ -101,13 +94,11 @@ def generate(
 def write_hdf5(phantom: PhantomProject, out_path) -> None:
     """
     Serialize a PhantomProject to disk in the layout
-    data_import/vendors/generic_parallel_synchrotron.py's plugin
-    expects -- the file this writes can be imported through
-    DataImporter.import_project() exactly like a real vendor file,
-    exercising the actual plugin-detection/completion pipeline rather
-    than just the in-memory shortcut below.
+    data_import/vendors/generic_parallel_synchrotron.py expects. The
+    file can be imported through DataImporter.import_project() like a
+    real vendor file.
     """
-    import h5py  # imported lazily, same pattern as everywhere else in this codebase
+    import h5py
 
     with h5py.File(out_path, "w") as f:
         f.attrs["beamline"] = "generic_parallel_synchrotron"
@@ -121,16 +112,10 @@ def write_hdf5(phantom: PhantomProject, out_path) -> None:
 def to_project_object(phantom: PhantomProject):
     """
     Build a core.project.ProjectObject directly from a PhantomProject,
-    entirely in memory -- no file written or read. The fast path for
-    testing completion/preprocessing/calibration without paying for an
-    hdf5 round-trip every time; write_hdf5() + DataImporter is the slow,
-    fully-realistic path that also exercises plugin detection.
-
-    Mirrors exactly what a real import of a generic_parallel_synchrotron
-    file would produce, including calling known_fields.reconcile() --
-    the same normalization DataImporter.import_project() applies.
+    entirely in memory. Calls known_fields.reconcile(), the same
+    normalization DataImporter.import_project() applies.
     """
-    from core.data_interface import DataInterface  # noqa: F401  (re-exported for convenience at the call site)
+    from core.data_interface import DataInterface  # noqa: F401
     from core.handles import RamHandle
     from core.known_fields import reconcile
     from core.metadata import MetadataBundle

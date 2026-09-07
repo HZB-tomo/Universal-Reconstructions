@@ -23,9 +23,8 @@ pip install -e .[dev]
 ```
 
 The `-e` (editable) install means `import core` and `import data_import`
-work from anywhere on your system — any notebook, any script — as long
-as it's running in this same virtual environment. `[dev]` also pulls in
-`pytest` for running the test suite.
+work from any notebook or script running in this virtual environment.
+`[dev]` also installs `pytest`.
 
 If you're working from a Jupyter notebook, make sure its kernel is
 actually using this virtual environment (check the kernel name in the
@@ -42,14 +41,12 @@ python -m ipykernel install --user --name=tomo_project --display-name="Python (t
 pytest tests/ -v
 ```
 
-This runs quickly (a few seconds) because the tests use small synthetic
-datasets, not the full-size ones. Everything should pass.
+The tests use small synthetic datasets, so this runs in a few seconds.
 
 ## 4. Generate the full-size synthetic dataset (optional)
 
-The test suite uses small/fast synthetic data. If you want the original
-full-spec dataset (256×256×512 volume, 800 angles) to experiment with —
-this takes a few minutes to generate:
+To generate the full-spec dataset (256x256x512 volume, 800 angles;
+takes a few minutes):
 
 ```bash
 python -m tests.fixtures.generate_synthetic
@@ -68,7 +65,7 @@ importer = DataImporter()
 project = importer.import_project(
     "tests/fixtures/generated/full/synthetic.h5",
     format="hdf5",
-    storage_mode="ram",   # or "disk" for hdf5 -- see ARCHITECTURE.md
+    storage_mode="ram",   # or "disk" for hdf5; see ARCHITECTURE.md
 )
 
 print(project)
@@ -96,12 +93,10 @@ plt.show()
 ## A note on paths from notebooks
 
 Relative paths (like `"tests/fixtures/generated/full/synthetic.h5"`
-above) are resolved relative to wherever the notebook's kernel is
-*currently running from* — which is often not the project root if your
-notebook lives in a subfolder. If you hit `FileNotFoundError`, either:
-
-- use an absolute path, or
-- add this to your first cell to locate the project root automatically:
+above) are resolved relative to the notebook kernel's current working
+directory, which may not be the project root. If you hit
+`FileNotFoundError`, either use an absolute path, or add this to your
+first cell to locate the project root:
 
 ```python
 import sys
@@ -112,15 +107,8 @@ project_root = next(p for p in [here, *here.parents] if (p / "data_import").is_d
 sys.path.insert(0, str(project_root))
 ```
 
-(This is mainly a fallback — with `pip install -e .` done in step 2, you
-usually don't need this for *imports* to work, only for *file paths* you
-build yourself.)
+## See also
 
-## Where to go next
-
-- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — how the whole codebase fits
-  together, read this next if you haven't already
-- [`USING_THE_PIPELINE.md`](./USING_THE_PIPELINE.md) — importing a
-  project and completing its metadata, in more depth than step 5 above
-- [`WRITING_A_PLUGIN.md`](./WRITING_A_PLUGIN.md) — how to add support
-  for a new instrument/vendor
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md)
+- [`USING_THE_PIPELINE.md`](./USING_THE_PIPELINE.md)
+- [`WRITING_A_PLUGIN.md`](./WRITING_A_PLUGIN.md)

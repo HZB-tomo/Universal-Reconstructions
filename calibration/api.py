@@ -1,59 +1,20 @@
 """
-find_center() / find_tilt_and_center(): the public entry points for
-center-of-rotation and rotation-axis-tilt calibration.
+Public entry points for center-of-rotation and rotation-axis-tilt
+calibration: find_center(), find_tilt(), centers_for_rows().
 
-Both take plain arrays, not a ProjectObject -- same reasoning as
-reconstruction.reconstruct() (see that module's docstring): the caller
-prepares whatever normalized data this needs beforehand, the same way
-it already calls preprocessing.normalize_rows() itself.
+find_center() finds the center of rotation of one sinogram, typically
+the middle row of a projection stack. find_tilt() finds rotation-axis
+tilt (axis lean) using several rows. centers_for_rows() turns a tilt
+angle and a center into a per-row center array for reconstruction.
 
-find_tilt_and_center() is the one that matters most in practice: it
-finds the center of rotation independently at several rows (via
-whichever backend's find_center() -- always the same deterministic,
-sinogram-domain operation, no reconstruction involved anywhere in this
-module) and fits a line through the results. This is the same method
-used by real reference code
-(oldscripts/Reconstruction_algotom_loop.ipynb's own
-find_tilt_and_center()), and it was verified directly against this
-project's own phantom generator before being adopted here, not assumed
-to work by analogy:
+Rotation-axis tilt means the physical rotation axis is not parallel to
+the detector's row axis, so the true center of rotation drifts linearly
+with row index. It is not the same as an in-plane rotation of each
+projection frame; find_tilt() only detects axis lean.
 
-  - A hand-constructed, KNOWN rotation-axis tilt (axis lean: the
-    physical rotation axis not parallel to the detector's row axis, so
-    the effective center of rotation drifts linearly with row) was
-    recovered to within about 1% of its true slope/angle this way.
-  - A DIFFERENT effect -- an in-plane rotation of each projection frame
-    ("detector roll") -- was verified NOT to be recoverable by this
-    method at all: a simulated 1-degree roll produced a recovered
-    "tilt" of roughly -43 degrees, nonsense. Roll mixes row and column
-    information (a fixed physical height smears across several detector
-    rows depending on column position), which breaks the per-row
-    independence this method relies on.
-
-So this module only ever targets axis lean, matching what the real
-reference code above also targets -- detector-roll detection/correction
-is a genuinely different, harder problem and is explicitly out of scope
-here. tests/fixtures/realistic_phantom's `tilt_deg` parameter simulates
-axis lean specifically for this reason (see simulate.py's
-apply_cor_and_tilt() docstring) -- it used to simulate detector roll,
-which this module could never have been validated against correctly.
-
-This orchestration -- picking rows, the robust line fit -- is
-deliberately NOT part of the backend contract (calibration/backend.py):
-every backend only has to implement the one, single-sinogram
-find_center() primitive; a from-scratch reimplementation (if algotom is
-ever unavailable) gets tilt-finding for free, unmodified.
-
-A manual/visual center check (reconstruct a range of candidate centers
-and look at them) deliberately has no function here -- it's just a
-direct call to reconstruction.reconstruct() with an array of candidate
-centers, exactly as oldscripts/Reconstruction_algotom_loop.ipynb's own
-center_visual_scan() does. No metric-based automatic scoring for that
-path: verified directly (see this project's own investigation, not
-covered further here) that naive image-quality metrics on a
-CPU-fallback FBP reconstruction are unreliable at sub-pixel granularity
--- the deterministic sinogram-domain methods in this module are the
-trustworthy automatic path.
+None of these functions take a ProjectObject. The caller prepares
+normalized data beforehand, the same way it calls
+preprocessing.normalize_rows().
 """
 from __future__ import annotations
 
@@ -74,23 +35,14 @@ def find_center(
 ) -> float:
     """
     Find the center of rotation of a single 180-degree sinogram,
-    (n_angles, width).
+    shape (n_angles, width).
 
-    `backend` selects which plugin does the work -- a name to look up
-    via get_backend(), or a CalibrationBackend instance directly.
-    Always explicit, same as reconstruction.reconstruct()'s `backend`.
+    `backend` is a registered backend name or a CalibrationBackend
+    instance.
 
-    `start`/`stop` bound the search range in column-index units; if
-    either is omitted, defaults to `width/2 +/- width/4` -- wider than
-    a backend's own default (algotom's is `width/2 +/- width/16`,
-    confirmed too narrow for anything beyond a small COR deviation),
-    but NOT the full column range: verified directly that widening all
-    the way to (0, width) makes the underlying search markedly less
-    reliable (it starts finding the wrong minimum on perfectly good
-    rows, not just failing safely) rather than more robust. A quarter
-    of the width is a reasonable, but not sacred, middle ground -- pass
-    `start`/`stop` explicitly if your setup's real deviations are
-    larger than that.
+    `start`/`stop` bound the search range in column-index units.
+    Defaults to `width/2 +/- width/4` if omitted. Pass `start`/`stop`
+    explicitly for offsets larger than a quarter of the width.
     """
     backend_instance = get_backend(backend) if isinstance(backend, str) else backend
     sino_180 = np.asarray(sino_180)
@@ -103,54 +55,71 @@ def find_center(
 
 
 @dataclass
-class TiltAndCenterResult:
+class TiltResult:
     """
-    Everything find_tilt_and_center() found, not just the two headline
-    numbers -- the per-row estimates and which ones were trusted are
-    worth keeping to diagnose a bad fit, the same way
-    Reconstruction_algotom_loop.ipynb's own version prints them.
+    Result of find_tilt().
+
+    tilt_deg: rotation-axis tilt, in degrees.
+    reference_row: the row center_at_reference_row is reported at.
+    center_at_reference_row: center of rotation at reference_row, from
+        the same line fit that produced tilt_deg.
+    rows: row indices sampled.
+    centers: per-row center estimate for each row in `rows`.
+    used: boolean mask into rows/centers; False marks a row dropped as
+        an outlier.
     """
 
-    tilt_deg: float  # arctan(pixels of center drift per row) -- see module docstring
-    center: float  # center of rotation at the middle row
-    rows: np.ndarray = field(repr=False)  # which rows were sampled
-    centers: np.ndarray = field(repr=False)  # this backend's per-row estimate, one per row in `rows`
-    used: np.ndarray = field(repr=False)  # boolean mask into rows/centers -- False for rows dropped as outliers
+    tilt_deg: float
+    reference_row: float
+    center_at_reference_row: float
+    rows: np.ndarray = field(repr=False)
+    centers: np.ndarray = field(repr=False)
+    used: np.ndarray = field(repr=False)
 
 
-def find_tilt_and_center(
+def find_tilt(
     projections: np.ndarray,
     backend: Union[str, CalibrationBackend],
+    center: Optional[float] = None,
     num_rows: int = 12,
     margin: int = 0,
     outlier_tolerance: float = 20.0,
     **options,
-) -> TiltAndCenterResult:
+) -> TiltResult:
     """
-    Find rotation-axis tilt and center-of-rotation together from a full
-    projection stack, (n_angles, n_rows, width) -- angle-first, matching
-    preprocessing.normalize_rows()'s own output, so its result can be
-    handed to this function directly, no reshaping.
+    Find rotation-axis tilt from a projection stack, shape
+    (n_angles, n_rows, width).
 
-    Method (see module docstring for why this is the right one, and
-    what it deliberately does NOT detect): sample `num_rows` rows
-    spread across the stack (skipping `margin` rows at the top/bottom,
-    where real scan data is often absent or unreliable), call
-    find_center() independently on each row's own 180-degree sinogram,
-    drop rows whose estimate is more than `outlier_tolerance` pixels
-    from the median (a row with no actual sample material gives a
-    meaningless estimate), then fit a line (center vs. row index)
-    through what's left.
+    Method: sample `num_rows` rows spread evenly across the stack,
+    skipping `margin` rows at the top and bottom. Call find_center()
+    independently on each sampled row's sinogram. Drop any row whose
+    estimate is more than `outlier_tolerance` pixels from the median of
+    all estimates. Fit a line (center vs. row index) through the
+    remaining rows. The slope gives tilt_deg; the line's value at the
+    stack's middle row is returned as center_at_reference_row.
 
-    `backend`/`**options` are forwarded to find_center() for every row.
+    `center`, if given, is an already-known center of rotation
+    (typically from find_center() at the stack's middle row). Each
+    row's search window is re-centered on `center +/- width/4` instead
+    of the sinogram's nominal midpoint, before searching. This affects
+    only rows where the true center falls outside the default window;
+    it has no effect when the offset is already within range. Pass
+    `start`/`stop` explicitly to override the window directly.
 
-    Raises RuntimeError if fewer than 3 rows survive the outlier check
-    -- not enough left to trust a line fit.
+    `backend`/`**options` are forwarded to find_center() for every
+    sampled row.
+
+    Raises ValueError if fewer than 2 rows remain after applying
+    `margin`. Raises RuntimeError if fewer than 3 rows survive the
+    outlier check.
     """
     projections = np.asarray(projections)
     n_angles, n_rows, width = projections.shape
     if n_rows - 2 * margin < 2:
         raise ValueError(f"Not enough rows ({n_rows}) left after applying margin={margin} on both sides.")
+
+    if center is not None and "start" not in options and "stop" not in options:
+        options = dict(options, start=center - width / 4.0, stop=center + width / 4.0)
 
     rows = np.linspace(margin, n_rows - 1 - margin, num_rows).astype(int)
     centers = np.array(
@@ -163,12 +132,37 @@ def find_tilt_and_center(
     if used.sum() < 3:
         raise RuntimeError(
             f"Center estimates are too inconsistent to fit a line: {np.round(centers, 2).tolist()}. "
-            "Check the search range, or whether this is really a standard scan "
-            "(not an offset-axis/extended-field-of-view one -- see find_center_360 for that case)."
+            "Check the search range, or whether this is an offset-axis/extended-field-of-view scan."
         )
 
     slope, intercept = np.polyfit(rows[used], centers[used], 1)
     tilt_deg = float(np.degrees(np.arctan(slope)))
-    center = float(slope * ((n_rows - 1) / 2.0) + intercept)
+    reference_row = (n_rows - 1) / 2.0
+    center_at_reference_row = float(slope * reference_row + intercept)
 
-    return TiltAndCenterResult(tilt_deg=tilt_deg, center=center, rows=rows, centers=centers, used=used)
+    return TiltResult(
+        tilt_deg=tilt_deg,
+        reference_row=reference_row,
+        center_at_reference_row=center_at_reference_row,
+        rows=rows,
+        centers=centers,
+        used=used,
+    )
+
+
+def centers_for_rows(tilt_deg: float, center: float, reference_row: float, rows) -> np.ndarray:
+    """
+    Build a per-row center array from a tilt angle and a center at one
+    known row, ready to pass to reconstruction.reconstruct()'s `center`
+    parameter.
+
+    `tilt_deg`, `center`, and `reference_row` may come from find_tilt(),
+    find_center(), or a value supplied directly.
+
+    `rows` is the row indices to compute centers for; it does not need
+    to match the rows find_tilt() sampled, and does not need to include
+    `reference_row`.
+    """
+    rows = np.asarray(rows, dtype=float)
+    slope = np.tan(np.radians(tilt_deg))
+    return center + slope * (rows - reference_row)

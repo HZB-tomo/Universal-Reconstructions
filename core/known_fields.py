@@ -1,34 +1,21 @@
 """
-This file is the single source of truth for every metadata field the
-rest of the software actually depends on -- what it's called, what tier
-it belongs to (see core/metadata.py for what tier means), what unit it's
-expressed in, and how a missing value for it should eventually get
-resolved.
+The catalog of every metadata field the software depends on: its tier
+(see core/metadata.py), unit, and how a missing value is resolved.
 
-Why this exists, and why it's separate from core/metadata.py:
-MetadataBundle and FieldSpec are deliberately generic -- they don't know
-what "voxel_size" means, they just track tier/value/source for whatever
-key a caller gives them. Before this file existed, tier was a string
-literal repeated in every vendor plugin (data_import/vendors/*.py),
-which meant nothing outside a plugin's own code enforced that it got a
-field's tier right, or even remembered to mention a required field at
-all. This file is what plugins and the completion stage both consult
-instead of each keeping their own copy of "what does this field mean."
+MetadataBundle and FieldSpec are generic; they do not know what
+"voxel_size" means. This file is what plugins and the completion stage
+both consult for field meaning, instead of each keeping its own copy.
 
-A vendor plugin is still free to report whatever ELSE it wants under
-whatever names it wants (see data_import/plugin.py) -- that data just
-rides along in the MetadataBundle unexamined, the same way
-PathMap.extra carries vendor-specific path info nothing else looks at
-(see data_import/path_map.py). This file only defines the fields the
-SOFTWARE depends on; it says nothing about what a plugin is allowed to
-report beyond that.
+A vendor plugin may still report other fields under other names (see
+data_import/plugin.py); that data rides along in the MetadataBundle
+unexamined. This file defines only the fields the software depends on.
 
-To add a new field: add one entry to KNOWN_FIELDS below. Nothing else
-needs to change for the field to be picked up by reconcile() /
-status() / completion's automatic pass -- see completion/engine.py.
+To add a field: add an entry to KNOWN_FIELDS. reconcile() / status() /
+completion's automatic pass pick it up automatically (see
+completion/engine.py).
 
-See doc/PROJECT_METADATA.md for the human-readable version of this
-table; keep the two in sync.
+See doc/PROJECT_METADATA.md for the human-readable version; keep the
+two in sync.
 """
 from __future__ import annotations
 
@@ -37,44 +24,36 @@ from typing import Any, Literal, Optional
 
 from core.metadata import MetadataBundle, Source, Tier
 
-# How a missing field's value actually gets filled in, once we know it's
-# expected (see reconcile() below for "whether it's expected" at all). A
-# field can list more than one strategy, tried in order -- e.g. angles
-# is ("derive", "ask"): try to derive it from other known fields first,
-# and only fall back to asking the user if that's not possible.
+# How a missing field's value gets filled in, once it is known to be
+# expected (see reconcile()). A field can list more than one strategy,
+# tried in order; angles is ("derive", "ask").
 #
-#   derive    -- computed automatically from other fields already known
-#                (a pure function of the project's current metadata).
-#   default   -- a fixed fallback value, applied automatically, always
-#                overridable by the user.
-#   ask       -- no safe default exists; something outside completion
-#                (a notebook cell today, a GUI form later) has to supply it.
-#   calculate -- an algorithm proposes a value from the actual image
-#                data and a human confirms/adjusts it. This is
-#                calibration's job, not completion's -- completion never
-#                attempts "calculate" strategy fields.
+#   derive:    computed automatically from other known fields.
+#   default:   a fixed fallback value, applied automatically, always
+#              overridable by the user.
+#   ask:       no safe default; something outside completion supplies it.
+#   calculate: an algorithm proposes a value from the image data and a
+#              human confirms or adjusts it. This is calibration's job;
+#              completion never attempts "calculate" fields.
 Strategy = Literal["derive", "default", "ask", "calculate"]
 
 
 @dataclass(frozen=True)
 class FieldDefinition:
     """
-    Everything the software needs to know about ONE known metadata key,
-    independent of any particular project. Instances of this live only
-    in KNOWN_FIELDS below -- a per-project FieldSpec (core/metadata.py)
-    is a different, per-instance thing that holds an actual value.
+    What the software needs to know about one known metadata key,
+    independent of any project. Instances live only in KNOWN_FIELDS. A
+    per-project FieldSpec (core/metadata.py) holds an actual value.
     """
 
     tier: Tier
     strategies: tuple[Strategy, ...]
     unit: str = ""
-    # Only meaningful when "default" is one of the strategies above.
-    default: Any = None
-    # Only meaningful when this field only matters under some other
-    # field's specific value -- e.g. source_to_detector_distance only
-    # matters if geometry_type == "cone". Shape: (other_field_key,
-    # required_value). None means "always relevant, regardless of any
-    # other field".
+    default: Any = None  # meaningful only when "default" is a strategy
+    # Meaningful only when this field matters conditionally on another
+    # field's value, e.g. source_to_detector_distance only when
+    # geometry_type == "cone". Shape: (other_field_key, required_value).
+    # None means always relevant.
     condition: Optional[tuple[str, Any]] = None
     description: str = ""
 
@@ -86,8 +65,8 @@ KNOWN_FIELDS: dict[str, FieldDefinition] = {
         strategies=("derive", "ask"),
         unit="degrees",
         description=(
-            "Per-projection rotation angle. Derived from angle_span + "
-            "projection count + rotation_direction if not given "
+            "Per-projection rotation angle. Derived from angle_span, "
+            "projection count, and rotation_direction if not given "
             "directly by the vendor."
         ),
     ),
@@ -96,9 +75,8 @@ KNOWN_FIELDS: dict[str, FieldDefinition] = {
         strategies=("ask",),
         unit="parallel | cone",
         description=(
-            "No safe default -- a wrong guess silently corrupts every "
-            "downstream calculation. Gates whether the cone-beam-only "
-            "fields below become relevant (see their `condition`)."
+            "No safe default. Gates whether the cone-beam-only fields "
+            "below become relevant (see their `condition`)."
         ),
     ),
     "angle_span": FieldDefinition(
@@ -112,7 +90,7 @@ KNOWN_FIELDS: dict[str, FieldDefinition] = {
         strategies=("default",),
         unit="cw | ccw",
         default="ccw",
-        description="Wrong default only flips orientation, never invalidates the reconstruction.",
+        description="A wrong default flips orientation; it does not invalidate the reconstruction.",
     ),
     # -- Pixel / detector --------------------------------------------------
     "voxel_size": FieldDefinition(
@@ -126,11 +104,7 @@ KNOWN_FIELDS: dict[str, FieldDefinition] = {
         strategies=("derive", "default"),
         unit="um",
         default=1.0,
-        description=(
-            "Only meaningfully distinct from voxel_size in cone-beam "
-            "(magnification); falls back to a plain static default "
-            "until a real deriver is registered for it."
-        ),
+        description="Distinct from voxel_size only in cone-beam (magnification).",
     ),
     # -- Cone-beam-only geometry --------------------------------------------
     "source_to_detector_distance": FieldDefinition(
@@ -138,7 +112,7 @@ KNOWN_FIELDS: dict[str, FieldDefinition] = {
         strategies=("ask",),
         unit="mm",
         condition=("geometry_type", "cone"),
-        description="Only relevant once geometry_type is known to be cone -- reconcile() won't flag this until then.",
+        description="Relevant only once geometry_type is known to be cone.",
     ),
     "source_to_object_distance": FieldDefinition(
         tier="mandatory_soft",
@@ -147,20 +121,20 @@ KNOWN_FIELDS: dict[str, FieldDefinition] = {
         condition=("geometry_type", "cone"),
         description="Same conditional behavior as source_to_detector_distance.",
     ),
-    # -- Alignment (computed -- never blocks anything, see core/metadata.py)
+    # -- Alignment (computed; never blocks anything, see core/metadata.py)
     "center_of_rotation": FieldDefinition(
         tier="computed",
         strategies=("calculate",),
         unit="pixels (deviation from image center, sub-pixel)",
         default=0.0,
-        description="Resolved by a calibration tool, not completion -- completion never attempts 'calculate' fields.",
+        description="Resolved by calibration, not completion.",
     ),
     "tilt_angle": FieldDefinition(
         tier="computed",
         strategies=("calculate",),
         unit="degrees",
         default=0.0,
-        description="Same as center_of_rotation: calibration's job.",
+        description="Resolved by calibration, not completion.",
     ),
     # -- Provenance ----------------------------------------------------------
     "operator": FieldDefinition(tier="optional", strategies=("ask",), unit="text"),
@@ -171,53 +145,44 @@ KNOWN_FIELDS: dict[str, FieldDefinition] = {
         tier="optional",
         strategies=(),
         unit="keV",
-        description="Pass-through only if a vendor happens to provide it -- never asked for, never affects calculations.",
+        description="Pass-through only if a vendor provides it.",
     ),
 }
 
 
 def reconcile(bundle: MetadataBundle) -> None:
     """
-    Make sure every field in KNOWN_FIELDS is represented in `bundle`,
-    one way or another. Called right after a plugin's parse_metadata()
-    returns (see data_import/importer.py's import_project()).
+    Ensure every field in KNOWN_FIELDS is represented in `bundle`.
+    Called after a plugin's parse_metadata() returns (see
+    data_import/importer.py's import_project()).
 
-    A plugin is only required to report fields it actually knows
-    something about. This function is what catches the rest: any
-    KNOWN_FIELDS key the plugin never touched at all gets added as
-    declared-missing, with the tier THIS registry says it should have --
-    independent of whether the plugin remembered to. Without this,
-    missing_hard()/missing_soft() only ever see what a plugin bothered
-    to self-report, which means a plugin that forgets to mention a
-    mandatory field fails silently instead of loudly.
+    Any KNOWN_FIELDS key the plugin did not report is added as
+    declared-missing, with the tier this registry specifies.
 
-    Conditional fields (e.g. source_to_detector_distance, which only
-    matters for cone-beam) are only added once their condition is
-    actually known to hold -- if geometry_type isn't resolved yet, this
-    function leaves them alone rather than flagging a cone-beam-only
-    field on what might turn out to be a parallel-beam project. Calling
-    this again later (which completion.run() does, via provide()) picks
-    them up as soon as their condition becomes true.
+    Conditional fields (e.g. source_to_detector_distance, cone-beam
+    only) are added only once their condition is known to hold. Calling
+    this again later (completion.run(), via provide()) picks them up as
+    soon as their condition becomes true.
 
-    Safe to call more than once -- already-addressed fields are left
+    Safe to call more than once; already-addressed fields are left
     untouched.
     """
     for key, definition in KNOWN_FIELDS.items():
         if bundle.get_field(key) is not None:
-            continue  # plugin (or a previous reconcile/completion pass) already addressed this
+            continue
 
         if definition.condition is not None:
             dep_key, required_value = definition.condition
             dep_field = bundle.get_field(dep_key)
             if dep_field is None or dep_field.value != required_value:
-                continue  # condition not (yet) known to hold -- don't flag this one yet
+                continue
 
         bundle.declare_missing(key, tier=definition.tier)
 
 
 @dataclass
 class FieldStatus:
-    """One row of what status() below reports for a single known field."""
+    """One row of what status() reports for a single known field."""
 
     key: str
     tier: Tier
@@ -229,14 +194,10 @@ class FieldStatus:
 
 def status(bundle: MetadataBundle) -> list[FieldStatus]:
     """
-    A full readout of every known field's current state: its tier and
-    strategy (from this registry) plus whether it's actually resolved
-    right now (from the bundle). This is what a notebook -- or later, a
-    GUI -- should call to see what a project still needs.
+    A readout of every known field's current state: tier and strategy
+    from this registry, plus whether it is resolved in `bundle`.
 
-    Calls reconcile() first (harmless if already done), so this always
-    reflects every KNOWN_FIELDS entry, not just whatever the plugin
-    happened to mention.
+    Calls reconcile() first.
     """
     reconcile(bundle)
     result = []

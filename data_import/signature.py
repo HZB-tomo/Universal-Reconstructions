@@ -1,24 +1,14 @@
 """
-This file implements HOW a plugin declares "this is my kind of file" --
-and it does so with plain, deterministic yes/no checks, not a fuzzy
-confidence score. We discussed this at length: confidence scores are
-opaque (why did it score 0.72?), while a checklist of required
-conditions is fully explainable (it failed because path X was missing).
+How a plugin declares "this is my kind of file": a deterministic
+checklist of required conditions, not a confidence score.
 
-The core idea, called "specificity": a signature is just a list of
-required conditions. The MORE conditions a signature checks, the more
-specific it is, and the more we should trust a match from it over a
-vaguer one. A vendor plugin that checks 5 exact paths+attributes is
-much more likely to be correct than a generic fallback that only checks
-"is this a valid hdf5 file at all" (1 condition). See plugin.py and
-importer.py for how specificity is used to pick a winner when multiple
-plugins match.
+A signature's specificity is the number of conditions it checks. See
+plugin.py and importer.py for how specificity picks a winner when
+multiple plugins match.
 
-Two concrete signature types exist because HDF5 and TIFF are structured
-completely differently -- HDF5 has internal named paths and attributes,
-while a TIFF "file" is really a folder of many files plus loose sidecar
-metadata files. Trying to force both into one generic "signature" shape
-would make both harder to use correctly, so we just have two.
+Two signature types exist because HDF5 (internal named paths and
+attributes) and TIFF (a folder of files plus sidecar metadata) are
+structured differently.
 """
 from __future__ import annotations
 
@@ -30,44 +20,30 @@ from typing import Callable, Optional
 
 @dataclass
 class SignatureResult:
-    """
-    The outcome of checking one signature against one file/folder.
-    Carries not just a yes/no answer but WHICH conditions were checked
-    and WHICH ones failed -- this is what makes detection debuggable:
-    when nothing matches, we can tell the user exactly why, per plugin.
-    """
+    """The outcome of checking one signature against one file/folder:
+    whether it matched, and which conditions were checked and failed."""
 
     matched: bool
-    checked: list[str]  # human-readable description of every condition tested
-    failed: list[str]   # human-readable description of conditions that failed
+    checked: list[str]
+    failed: list[str]
 
 
 class Signature(ABC):
-    """
-    Common interface for both signature types below. Nothing outside
-    this file should need to know whether it's dealing with an
-    Hdf5Signature or a TiffSignature -- both just answer check() and
-    expose a specificity score.
-    """
+    """Common interface for both signature types."""
 
     @abstractmethod
     def check(self, target) -> SignatureResult:
         """
-        Test this signature against `target`, which is a format-specific
-        handle: an open h5py.File for HDF5 signatures, or a folder Path
-        for TIFF signatures.
+        Test this signature against `target`: an open h5py.File for
+        HDF5 signatures, or a folder Path for TIFF signatures.
         """
 
     @property
     @abstractmethod
     def specificity(self) -> int:
-        """
-        How many distinct conditions this signature requires. Used as
-        the tie-breaker when multiple plugins match the same file --
-        higher specificity wins, because it means the plugin "knows
-        more" about this exact file structure and is less likely to be
-        a coincidental match.
-        """
+        """How many distinct conditions this signature requires. Used
+        as the tie-breaker when multiple plugins match the same file;
+        higher specificity wins."""
 
 
 @dataclass
@@ -96,7 +72,7 @@ class Hdf5Signature(Signature):
     # Escape hatch for conditions that aren't simple path/attribute
     # checks (e.g. "does any dataset have exactly 3 dimensions?"). Takes
     # the open h5py.File and returns (passed: bool, description: str).
-    # Optional -- most plugins won't need this.
+    # Optional; most plugins won't need this.
     custom_predicate: Optional[Callable[[object], tuple[bool, str]]] = None
 
     def check(self, handle) -> SignatureResult:

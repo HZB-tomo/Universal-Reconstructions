@@ -3,53 +3,43 @@
 This is the human-readable reference for every metadata field a
 `ProjectObject` carries from import through to reconstruction handoff.
 
-**The actual source of truth is code, not this file**: [core/known_fields.py](../core/known_fields.py)
-is what `data_import`'s importer and `completion/` both consult at
-runtime. This document exists so "why is this one required" has a
-readable place to look instead of reading the registry's dataclass
-fields directly — but if the two ever disagree, the code is correct and
-this file is stale and needs updating, not the other way around.
+The source of truth is [core/known_fields.py](../core/known_fields.py),
+consulted at runtime by `data_import`'s importer and `completion/`. If
+this document and the code disagree, the code is correct.
 
-This documents the **completion stage** fields (this is the stage
-currently implemented — see `completion/`). Calibration adds
-`center_of_rotation` and `tilt_angle`, both already listed below since
-their tier/strategy is settled even though the calibration tools
-themselves aren't built yet. Preprocessing- and reconstruction-stage
-fields (flat/dark correction status, ring removal, log transform, etc.)
-are intentionally not listed here yet — they'll be added when that
-stage is designed.
+This documents the completion-stage fields, plus `center_of_rotation`
+and `tilt_angle`, which are filled in by `calibration/`. Preprocessing-
+and reconstruction-stage fields (flat/dark correction status, ring
+removal, log transform, etc.) are not listed here.
 
 ## Vocabulary
 
 Two independent axes describe every field:
 
-- **Tier** — the consequence of the field staying missing. The four
-  tiers live in `core/metadata.py`:
-  - `mandatory_hard` — missing it fails import outright.
-  - `mandatory_soft` — import still succeeds, but the field shows up in
+- **Tier**: the consequence of the field staying missing. Defined in
+  `core/metadata.py`:
+  - `mandatory_hard`: missing it fails import outright.
+  - `mandatory_soft`: import still succeeds, but the field shows up in
     `needs_user_input()` until it's resolved.
-  - `optional` — no consequence if missing, ever.
-  - `computed` — never blocks anything, at import or later. Always
-    carries a best-available value (a seed guess if nothing better has
-    been supplied yet) that a later stage can refine and overwrite.
-- **Resolution strategy** — *how* a missing value actually gets filled
-  in. Lives in `core/known_fields.py` (`Strategy`), consumed by
+  - `optional`: no consequence if missing.
+  - `computed`: never blocks anything. Always carries a best-available
+    value that a later stage can refine and overwrite.
+- **Resolution strategy**: how a missing value gets filled in. Defined
+  in `core/known_fields.py` (`Strategy`), consumed by
   `completion/engine.py`'s automatic pass:
-  - `Derive` — computed automatically from other fields already present
-    (e.g. angles from angle span + projection count). The built-in
+  - `Derive`: computed automatically from other fields already present
+    (e.g. angles from angle span and projection count). Built-in
     derivers live in [`completion/derivers.py`](../completion/derivers.py),
     registered via `completion/engine.py`'s `register_deriver()`.
-  - `Default` — a fixed fallback value applied automatically if nothing
-    else is available, but always overridable by the user.
-  - `Ask` — no safe default exists; something outside `completion/`
-    (a notebook cell today, a GUI form later) has to supply it via
-    `completion.provide()`.
-  - `Calculate` — an algorithm proposes a value from the actual image
-    data, and the user confirms or adjusts it (calibration stage only —
-    `completion/` never attempts these).
+  - `Default`: a fixed fallback value, applied automatically, always
+    overridable by the user.
+  - `Ask`: no safe default; something outside `completion/` supplies it
+    via `completion.provide()`.
+  - `Calculate`: an algorithm proposes a value from the image data, and
+    the user confirms or adjusts it. `completion/` never attempts these.
 
-A field can list more than one strategy, tried in order — e.g. `angles`
-is derive-then-ask.
+A field can list more than one strategy, tried in order; `angles` is
+derive-then-ask.
 
 ## Fields
 

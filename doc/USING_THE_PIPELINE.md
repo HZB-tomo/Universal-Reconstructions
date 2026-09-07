@@ -1,25 +1,16 @@
 # Using the pipeline
 
-This is for someone *using* the software to load and prepare a dataset —
-in a notebook or a script — not someone adding support for a new
-instrument. If you're writing a vendor plugin instead, see
-[`WRITING_A_PLUGIN.md`](./WRITING_A_PLUGIN.md). If you want to know why
-things are built the way they are, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+For loading and preparing a dataset in a notebook or script. For
+writing a vendor plugin, see [`WRITING_A_PLUGIN.md`](./WRITING_A_PLUGIN.md).
+For how the codebase is structured, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-The pipeline, as far as it's built today, has five stages:
+The pipeline has five stages:
 
 ```
-import  →  completion  →  preprocessing  →  calibration  →  reconstruction
+import  ->  completion  ->  preprocessing  ->  calibration  ->  reconstruction
 ```
-
-This document walks through all five, in order.
 
 ## 1. Importing a project
-
-You give `DataImporter` a file (or folder, for tiff) and tell it what
-format it is. It figures out the rest on its own — which instrument
-wrote the file, where the data lives inside it, what metadata it
-contains — you don't need to know or specify any of that.
 
 ```python
 from data_import.importer import DataImporter
@@ -28,46 +19,28 @@ importer = DataImporter()
 project = importer.import_project(
     "my_scan.h5",
     format="hdf5",          # or "tiff", for a folder of tiff files
-    storage_mode="ram",     # or "disk" -- see below
+    storage_mode="ram",     # or "disk"
 )
 print(project)
 ```
 
-**`format`** is `"hdf5"` or `"tiff"` — you have to say which, the
-software won't guess this part for you from the file extension.
+`format` is `"hdf5"` or `"tiff"`.
 
-**`storage_mode`** controls whether the projection/flat/dark arrays are
-read fully into memory now (`"ram"`) or left on disk and read lazily as
-you actually use them (`"disk"`). `"disk"` only works for hdf5 — tiff
-data is always loaded fully into RAM, so passing `storage_mode="disk"`
-for a tiff project raises a `ValueError`. Use `"disk"` for datasets too
-large to comfortably fit in memory; you can always switch to RAM later
-(see below).
+`storage_mode` controls whether projection/flat/dark arrays are read
+fully into memory (`"ram"`) or left on disk and read lazily
+(`"disk"`). `"disk"` only works for hdf5; tiff data is always loaded
+into RAM, and `storage_mode="disk"` for a tiff project raises
+`ValueError`.
 
 ### If the file isn't recognized
 
-Two errors can come out of `import_project()` before you even get a
-project back:
-
-- **`NoVendorMatchError`** — nothing recognized this file at all. The
-  error message lists, for every known vendor, exactly which check
-  failed — useful for figuring out whether the file is genuinely
-  unsupported or just doesn't quite match what's expected.
-- **`AmbiguousVendorMatchError`** — more than one vendor convention
-  matched equally well, so the software refuses to guess. You can
-  resolve this by passing a specific plugin instance yourself via
-  `import_project(..., plugin=<instance>)`, if you know which one is
-  correct.
-
-Neither of these should come up often in normal use — they mean the
-file genuinely doesn't match anything the software currently knows how
-to read.
+- `NoVendorMatchError`: no plugin recognized the file. The message
+  lists, for every known vendor, which check failed.
+- `AmbiguousVendorMatchError`: more than one vendor convention matched
+  equally well. Resolve by passing a specific plugin instance via
+  `import_project(..., plugin=<instance>)`.
 
 ### Reading the actual data
-
-Once you have a `project`, read data and metadata out of it through
-`DataInterface` — never touch `project.data_handles` directly, since
-that's what hides whether you're RAM- or disk-backed:
 
 ```python
 from core.data_interface import DataInterface
@@ -75,21 +48,15 @@ from core.data_interface import DataInterface
 di = DataInterface(project)
 
 di.get_projections()          # the full projection stack
-di.get_projections(index=0)   # just one angle, without loading the rest
+di.get_projections(index=0)   # just one angle
 di.get_flats()                # None if this project has no flats
 di.get_metadata("angles")
 ```
 
-If you imported with `storage_mode="disk"` and later decide you want
-everything in memory, `di.materialize_to_ram()` converts every handle
-over — one-directional, explicit, does nothing automatically.
+`di.materialize_to_ram()` converts every disk-backed handle to a RAM
+handle.
 
 ## 2. Completion — filling in what the file didn't tell you
-
-A vendor's file rarely contains everything the software needs. Some of
-that is recoverable automatically (a default, or working it out from
-other values already present); the rest genuinely has to come from you.
-That's what the completion stage is for.
 
 ### Checking what's there
 
@@ -100,11 +67,9 @@ for row in status(project.metadata):
     print(row.key, row.tier, row.resolved, row.value)
 ```
 
-This reports on every field the software actually depends on — not just
-whatever the file happened to mention — so it also tells you about
-fields the file is silently missing entirely. See
-[`PROJECT_METADATA.md`](./PROJECT_METADATA.md) for what each field means,
-its unit, and valid values.
+Reports on every field the software depends on. See
+[`PROJECT_METADATA.md`](./PROJECT_METADATA.md) for field meaning, unit,
+and valid values.
 
 ### Filling in what can be filled in automatically
 
@@ -114,15 +79,11 @@ import completion
 completion.run(project)
 ```
 
-This applies defaults and works out anything derivable from data
-already present — e.g. `angles` from `angle_span` and the projection
-count, or vice versa, whichever one the vendor didn't already provide.
-It's safe to call as often as you like — anything already resolved is
-left alone. Some fields (`geometry_type`, for instance) have no way to
-be worked out automatically at all — there's no safe default and
-nothing to derive it from — so they'll still be missing after this,
-waiting on you (see the note at the end of this section for the full
-list of what completion can and can't do on its own).
+Applies defaults and derives values from data already present (e.g.
+`angles` from `angle_span` and the projection count, or vice versa).
+Safe to call repeatedly; resolved fields are left alone. Fields with no
+safe default and nothing to derive from (e.g. `geometry_type`) remain
+missing.
 
 ### Checking what's still needed
 
@@ -138,35 +99,27 @@ completion.provide(project, "geometry_type", "cone")
 completion.provide(project, "angle_span", 360.0)
 ```
 
-Each call records your answer and immediately re-runs the automatic
-pass — so one answer can unlock others. For example, answering
-`geometry_type="cone"` will make cone-beam-only fields like
-`source_to_detector_distance` show up as newly required, where they
-were correctly hidden before (a parallel-beam project never asks for
-them at all).
-
-A typical loop looks like this:
+Each call records the answer and re-runs the automatic pass, so one
+answer can unlock others. For example, `geometry_type="cone"` makes
+cone-beam-only fields like `source_to_detector_distance` newly
+required.
 
 ```python
 completion.run(project)
 while project.needs_user_input():
     for key in project.missing_soft_fields():
-        value = ...  # however you're collecting it -- input(), a config file, a form
+        value = ...  # input(), a config file, a form
         completion.provide(project, key, value)
 ```
 
-### What completion does *not* do yet
+### What completion does not do
 
-`angles`, `angle_span`, and `detector_pixel_size` all have real derive
-logic now (`completion/derivers.py`) — but a deriver only helps if its
-*own* inputs are available. `angles` derives from `angle_span` (plus the
-projection count and `rotation_direction`); if a vendor provides
-neither `angles` nor `angle_span`, there's nothing to derive either one
-from, and both stay missing until you supply at least one via
-`completion.provide()`. There's also no calculation of any kind for
-`center_of_rotation` or `tilt_angle` — those are `computed`-tier and
-deliberately untouched by completion; they're the job of the
-calibration stage, which comes after preprocessing (below).
+`angles`, `angle_span`, and `detector_pixel_size` have derive logic
+(`completion/derivers.py`), but a deriver only helps if its own inputs
+are available. If a vendor provides neither `angles` nor `angle_span`,
+both stay missing until supplied via `completion.provide()`.
+`center_of_rotation` and `tilt_angle` are `computed`-tier and are not
+touched by completion; they are the job of the calibration stage.
 
 ## 3. Checking completion readiness
 
@@ -174,68 +127,35 @@ calibration stage, which comes after preprocessing (below).
 project.needs_user_input()   # False once completion is done
 ```
 
-Once this is `False`, every field the software depends on for the next
-stage is either filled in or was never required in the first place —
-that's what "completion-ready" means. `status(project.metadata)` still
-gives you the full picture if you want to see it directly rather than
-just the yes/no answer.
+`status(project.metadata)` gives the full picture.
 
 ## 4. Preprocessing — normalization and artifact removal
-
-Once a project is completion-ready, `preprocessing/` turns its raw
-projections into reconstruction-ready sinograms: flat/dark correction
-first, then (optionally) zinger and ring-artifact removal. These
-functions read a `ProjectObject`'s raw data but don't need its metadata
-to be fully resolved — flat/dark correction only cares about the
-`projections`/`flats`/`darks` arrays — so technically nothing stops you
-from calling this stage before completion finishes. In practice you
-still want completion done first: calibration (next) needs
-`geometry_type`/`angle_span` to pick the right approach, so there's no
-reason to reorder the stages just because one function happens not to
-require it.
 
 ### Flat/dark correction
 
 ```python
 from preprocessing import build_reference, normalize, normalize_slice, normalize_rows
 
-reference = build_reference(project)              # reduces flats/darks once -- reuse this
-normalize(raw_array, reference)                    # the raw formula, if you already have an array
-normalize_slice(project, row=64, reference=reference)          # one sinogram, all angles
+reference = build_reference(project)              # reduces flats/darks once
+normalize(raw_array, reference)                    # the raw formula, given an array
+normalize_slice(project, row=64, reference=reference)          # one sinogram
 normalize_rows(project, slice(100, 200), reference=reference)  # a batch of rows
 normalize_rows(project, slice(None), reference=reference)      # the entire volume
 ```
 
 `build_reference()` raises `MissingFlatFieldError` if the project has
-no flat field data at all — there's no fallback for that. A missing
-dark field is fine, in two different ways depending on what you
-actually know about your instrument:
+no flat field data. A missing dark field is handled two ways:
 
 ```python
 build_reference(project)                    # no dark data, no known offset -- dark = 0.0
-build_reference(project, dark_offset=100.0)  # no dark data, but a KNOWN constant offset
+build_reference(project, dark_offset=100.0)  # no dark data, a known constant offset
 ```
 
-`dark_offset`, when given, always wins — even over real dark frames the
-project might have, if you have a specific reason to override them.
-This is for exactly the situation `oldscripts/BAMline_recon_v0p2.py`
-was in: no dark field was ever acquired for that instrument, but a
-known constant detector offset (hardcoded there as `100`) stands in for
-one. Either way, `reference.dark` ends up a plain scalar instead of a
-2D image, and the same formula works via plain numpy broadcasting.
+`dark_offset`, when given, takes precedence over any real dark frames
+the project has. `reference.dark` is then a scalar instead of a 2D
+image.
 
-`normalize_slice()`/`normalize_rows()`/the whole-volume call all
-produce identical results for the same rows — they're the same
-underlying formula, just handed different-shaped input. Pick whichever
-matches what you're doing: a single test slice while exploring, a
-bounded batch to keep memory in check on a large disk-backed project,
-or the whole volume at once if you have the RAM for it.
-
-Deliberately **not** included here: `-log()`. Every real pipeline this
-project's `oldscripts/` were checked against applies that right
-before/inside reconstruction, never as part of flat/dark correction —
-ring removal and (later) reconstruction itself both expect the plain
-transmission data these functions produce.
+`-log()` is not applied here; it happens at or inside reconstruction.
 
 ### Zinger and ring-artifact removal (optional)
 
@@ -249,107 +169,57 @@ clean = remove_ring_artifacts(sinogram, method="sorting")   # or "filtering"/"fi
 clean_volume = process_volume(volume, remove_ring_artifacts, method="sorting")
 ```
 
-Run these on `normalize()`'s output, in that order (matches
-`oldscripts/full_reconstruction_cli.py`'s pipeline exactly: flat/dark
-correction → zinger removal → ring removal → reconstruction).
-
-These need the `algotom` package, which is **not** installed by
-default — `pip install .[preprocessing]` (or `pip install algotom`
-directly). Nothing else in this project needs it. Call one of these
-three functions without it installed and you get a plain `ImportError`
-telling you what to install, rather than this whole package failing to
-import — `import preprocessing` itself always works regardless.
+Run on `normalize()`'s output. Requires the optional `algotom` package
+(`pip install .[preprocessing]` or `pip install algotom`); calling
+these without it installed raises `ImportError`.
 
 ### Where does the result go?
 
-Nowhere, on purpose. Every function in `preprocessing/` is pure: array
-in, array out. Nothing gets written back onto `project` or
-`project.data_handles` — there's no `project.normalized_projections`
-to find later. Two reasons this is deliberate, not unfinished:
-
-- A large in-memory result attached to `project` lives exactly as long
-  as `project` does. A pipeline script that uses a batch and lets it go
-  out of scope avoids holding onto memory it doesn't need anymore;
-  attaching results to a long-lived object would work against that.
-- With a real pipeline script driving the sequence (import → complete →
-  preprocess → calibrate → reconstruct, in a straight line), there's no
-  ambiguity about "has this been normalized yet" for the script to
-  resolve — the script's own control flow already answers that. A
-  stored flag would be solving a problem that only shows up once
-  something *other* than one linear script needs to ask the question —
-  a GUI with multiple independent entry points, for instance. Worth
-  revisiting then, not now.
+Nowhere. Every function in `preprocessing/` is pure: array in, array
+out. Nothing is written back onto `project`.
 
 ## 5. Calibration — finding the center of rotation and tilt
 
-Before reconstructing, you need a center of rotation — and if the
-rotation axis isn't perfectly parallel to the detector's rows, a tilt
-too. `calibration.find_tilt_and_center()` finds both together from a
-normalized projection stack:
-
 ```python
-from calibration import find_tilt_and_center
+from calibration import find_center, find_tilt, centers_for_rows
 
-result = find_tilt_and_center(normalized, backend="algotom", num_rows=12, margin=4)
+middle_row = normalized.shape[1] // 2
+center = find_center(normalized[:, middle_row, :], backend="algotom")   # or a manual number
+result = find_tilt(normalized, backend="algotom", num_rows=12, margin=4)
 result.tilt_deg   # degrees
-result.center     # center of rotation at the middle row
 ```
 
-`normalized` is the same `(n_angles, n_rows, width)` array
-`normalize_rows()` already produces — hand it over directly, no
-reshaping, same convention as reconstruction below.
+`normalized` is the `(n_angles, n_rows, width)` array
+`normalize_rows()` produces.
 
-Like `reconstruction/`, this takes plain arrays, not a `ProjectObject`,
-and `backend` is always explicit. Unlike reconstruction, it never
-reconstructs anything internally — it's pure, deterministic
-sinogram-domain math, so calling it twice on the same input always
-gives the same answer (verified directly; `reconstruction.reconstruct()`'s
-CPU-fallback path can't make that promise). See
-[`CALIBRATION.md`](./CALIBRATION.md) for the full method, the citation
-for the algorithm it wraps, and — worth reading before trusting your
-own intuition about the word "tilt" — why it specifically means
-*rotation-axis tilt*, not an in-plane rotation of the detector; those
-are different physical effects with different fixes, confirmed
-directly, not assumed.
-
-Once you have a center (and, if nonzero, a tilt), turn the tilt into a
-per-row center array for reconstruction — no separate correction step
-needed:
+`find_center()` and `find_tilt()` take plain arrays, not a
+`ProjectObject`, and `backend` is always explicit. Neither reconstructs
+anything internally; calling either twice on the same input gives the
+same answer. See [`CALIBRATION.md`](./CALIBRATION.md) for the method
+and for why "tilt" here means rotation-axis tilt, not an in-plane
+rotation of the detector.
 
 ```python
-import numpy as np
+from calibration import centers_for_rows
 
-n_rows = normalized.shape[1]
-slope = np.tan(np.radians(result.tilt_deg))
-centers = result.center + slope * (np.arange(n_rows) - (n_rows - 1) / 2.0)
+rows = list(range(normalized.shape[1]))
+centers = centers_for_rows(result.tilt_deg, center, reference_row=middle_row, rows=rows)
 ```
 
-`reconstruct()` already accepts one center per slice (see below), so
-this array is all reconstruction needs to account for the tilt.
+`reconstruct()` accepts one center per slice, so this array is all
+reconstruction needs to account for the tilt.
 
 ## 6. Reconstruction
-
-Once you have normalized sinograms, `reconstruction.reconstruct()`
-turns them into images — one slice, several, or a whole volume,
-through whichever backend you choose. Unlike every stage above, this
-one takes plain arrays, not a `ProjectObject` — you prepare whatever it
-needs beforehand, the same way you already call `normalize_rows()`
-yourself rather than something reaching into `project` on its own. See
-[`RECONSTRUCTION.md`](./RECONSTRUCTION.md) for the full reference and
-why that decoupling matters specifically for calibration; this section
-is just the everyday call.
 
 ```python
 from reconstruction import Geometry, reconstruct
 
 geometry = Geometry(geometry_type=di.get_metadata("geometry_type"))
-center = calibrated.center   # from calibration.find_tilt_and_center() -- see section 5 above
-
 image = reconstruct(sinogram, project.metadata.get("angles"), center, geometry, backend="algotom_fbp")
 ```
 
-Pass a single `(n_angles, width)` sinogram for one image back, or a
-stack for a matching stack of images back — no separate function:
+`reconstruct()` takes plain arrays, not a `ProjectObject`. See
+[`RECONSTRUCTION.md`](./RECONSTRUCTION.md).
 
 ```python
 one_slice = normalize_slice(project, row=64, reference=reference)
@@ -360,31 +230,22 @@ images = reconstruct(several, angles, center, geometry, backend="algotom_fbp")  
 ```
 
 `normalize_rows()`'s output shape, `(n_angles, n_slices, width)`, is
-exactly the shape `reconstruct()` expects for a stack — hand it over
-directly, no reshaping needed.
+the shape `reconstruct()` expects for a stack.
 
-**The center matters, a lot.** Reconstructing with the wrong center
-doesn't just blur the result — it produces a visibly off-axis,
-asymmetrically cropped image, sometimes with a visible seam artifact.
-See [`doc/demo/04_reconstruction.ipynb`](./demo/04_reconstruction.ipynb)
-for a direct side-by-side. `calibration.find_tilt_and_center()` (section
-5 above) finds it automatically; if it's ever unreliable for your
-setup, a manual visual check — reconstruct a range of candidate centers
-and look at them — is just a direct call to `reconstruct()` with an
-array of trial centers, no separate tool needed.
+A wrong center produces a visibly off-axis, asymmetrically cropped
+image; see [`doc/demo/04_reconstruction.ipynb`](./demo/04_reconstruction.ipynb)
+for a side-by-side. A manual visual check (reconstruct a range of
+candidate centers and look at them) is a direct call to `reconstruct()`
+with an array of trial centers.
 
-`algotom_fbp` (the one built-in backend, parallel-beam only) needs the
-same optional `algotom` package as the ring/zinger removal above — the
-`preprocessing` extra covers both.
+`algotom_fbp` needs the same optional `algotom` package as ring/zinger
+removal.
 
-**Units aren't optional, and there's nothing to configure.** If
-`geometry.detector_pixel_size` is set (this project always stores it
-in micrometers), the returned values are real attenuation
-coefficients in inverse micrometers (1/um). If it's `None`, they come
-back in "per pixel" units instead — usable for visual comparison
-within one dataset, but not physically meaningful across datasets with
-different pixel sizes. The result is always `float32`. See
-[`RECONSTRUCTION.md`](./RECONSTRUCTION.md)'s "Units" section for why.
+If `geometry.detector_pixel_size` is set (stored in micrometers), the
+returned values are attenuation coefficients in inverse micrometers
+(1/um). If it's `None`, they are in "per pixel" units. The result is
+always `float32`. See [`RECONSTRUCTION.md`](./RECONSTRUCTION.md)'s
+"Units" section.
 
 ## Full example
 
@@ -393,7 +254,7 @@ from data_import.importer import DataImporter
 from core.known_fields import status
 import completion
 from preprocessing import build_reference, normalize_rows
-from calibration import find_tilt_and_center
+from calibration import find_center, find_tilt, centers_for_rows
 from reconstruction import Geometry, reconstruct
 
 importer = DataImporter()
@@ -402,12 +263,10 @@ project = importer.import_project("my_scan.h5", format="hdf5", storage_mode="ram
 completion.run(project)
 while project.needs_user_input():
     for key in project.missing_soft_fields():
-        print(f"{key} is missing -- ", end="")
         value = input(f"enter a value for {key}: ")
         completion.provide(project, key, value)
 
 assert not project.needs_user_input()
-print("Project is completion-ready:")
 for row in status(project.metadata):
     print(f"  {row.key}: {row.value!r}")
 
@@ -415,29 +274,19 @@ reference = build_reference(project)
 normalized = normalize_rows(project, slice(None), reference)
 
 geometry = Geometry(geometry_type=project.metadata.get("geometry_type"))
-calibrated = find_tilt_and_center(normalized, backend="algotom", num_rows=12, margin=4)
-volume = reconstruct(normalized, project.metadata.get("angles"), calibrated.center, geometry, backend="algotom_fbp")
+middle_row = normalized.shape[1] // 2
+center = find_center(normalized[:, middle_row, :], backend="algotom")
+tilt = find_tilt(normalized, backend="algotom", num_rows=12, margin=4)
+centers = centers_for_rows(tilt.tilt_deg, center, reference_row=middle_row, rows=range(normalized.shape[1]))
+volume = reconstruct(normalized, project.metadata.get("angles"), centers, geometry, backend="algotom_fbp")
 ```
 
-## Where to go next
+## See also
 
-- [`doc/demo/02_completion.ipynb`](./demo/02_completion.ipynb) — the
-  completion workflow, run end-to-end against a generated example
-  dataset with real output.
-- [`doc/demo/03_realistic_phantom.ipynb`](./demo/03_realistic_phantom.ipynb) —
-  generating test data with known center-of-rotation/tilt/detector
-  defects.
-- [`doc/demo/04_reconstruction.ipynb`](./demo/04_reconstruction.ipynb) —
-  the reconstruction workflow above, including the wrong-vs-correct
-  center comparison.
-- [`CALIBRATION.md`](./CALIBRATION.md) — the full calibration
-  reference: the backend contract, the method behind
-  `find_tilt_and_center()`, and why it targets rotation-axis tilt
-  specifically, not detector roll.
-- [`RECONSTRUCTION.md`](./RECONSTRUCTION.md) — the full reconstruction
-  reference: the backend contract, axis conventions, how to write a new
-  backend.
-- [`PROJECT_METADATA.md`](./PROJECT_METADATA.md) — the full field
-  reference: every field's tier, resolution strategy, unit, and notes.
-- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — how and why the codebase is
-  structured this way.
+- [`doc/demo/02_completion.ipynb`](./demo/02_completion.ipynb)
+- [`doc/demo/03_realistic_phantom.ipynb`](./demo/03_realistic_phantom.ipynb)
+- [`doc/demo/04_reconstruction.ipynb`](./demo/04_reconstruction.ipynb)
+- [`CALIBRATION.md`](./CALIBRATION.md)
+- [`RECONSTRUCTION.md`](./RECONSTRUCTION.md)
+- [`PROJECT_METADATA.md`](./PROJECT_METADATA.md)
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md)
