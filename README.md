@@ -12,7 +12,7 @@ reconstruction algorithm, or calibrating a new detector are all
 localized changes rather than rewrites:
 
 ```
-import  ->  completion  ->  preprocessing  ->  calibration  ->  reconstruction
+import  ->  completion  ->  preprocessing  ->  calibration  ->  reconstruction  ->  export
 ```
 
 - **import** reads a vendor's file (HDF5 or TIFF) into a common
@@ -24,12 +24,27 @@ import  ->  completion  ->  preprocessing  ->  calibration  ->  reconstruction
 - **calibration** finds the center of rotation and any rotation-axis
   tilt.
 - **reconstruction** turns calibrated sinograms into a reconstructed
-  image or volume.
+  image or volume, and writes it to disk.
 
 Calibration and reconstruction are built as swappable backends (a
 registry, like the vendor plugins), so adding support for a different
 reconstruction package is a matter of writing one new backend file,
 not restructuring the pipeline.
+
+`orchestration/` drives one project, or many independently, through
+every stage above from a single config -- either built directly in
+code, or a hand-editable INI file, so a batch of projects can be set
+up and run unattended. `pip install -e .` also registers a `tomo`
+command-line tool over the same thing:
+
+```bash
+tomo init-config scan.ini   # a commented, fillable config template
+tomo run scan.ini           # run one project
+tomo batch batch.ini        # run every project in a batch config, independently
+```
+
+See [`doc/ORCHESTRATION.md`](./doc/ORCHESTRATION.md) and
+[`doc/CLI.md`](./doc/CLI.md).
 
 ## Install
 
@@ -73,6 +88,8 @@ stages end to end, or the worked notebooks in
 ## Documentation
 
 - [`doc/USING_THE_PIPELINE.md`](./doc/USING_THE_PIPELINE.md) — end-user walkthrough of all five stages
+- [`doc/ORCHESTRATION.md`](./doc/ORCHESTRATION.md) — running one or many projects unattended, from a config file
+- [`doc/CLI.md`](./doc/CLI.md) — the `tomo` command line: every subcommand, exit codes, example output
 - [`doc/ARCHITECTURE.md`](./doc/ARCHITECTURE.md) — how the codebase is structured
 - [`doc/WRITING_A_PLUGIN.md`](./doc/WRITING_A_PLUGIN.md) — adding support for a new instrument
 - [`doc/PROJECT_METADATA.md`](./doc/PROJECT_METADATA.md) — every metadata field's tier, strategy, and unit

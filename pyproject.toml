@@ -24,10 +24,14 @@ dev = ["pytest"]
 # import the whole package.
 preprocessing = ["algotom"]
 
+[project.scripts]
+tomo = "orchestration.cli:main"
+
 [tool.setuptools]
 packages = [
     "core", "data_import", "data_import.vendors",
     "completion", "preprocessing",
     "calibration", "calibration.backends",
     "reconstruction", "reconstruction.backends",
+    "orchestration",
 ]

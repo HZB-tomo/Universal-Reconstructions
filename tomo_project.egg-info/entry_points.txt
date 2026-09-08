@@ -1,0 +1,2 @@
+[console_scripts]
+tomo = orchestration.cli:main

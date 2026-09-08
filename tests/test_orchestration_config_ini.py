@@ -176,6 +176,16 @@ def test_write_config_template_produces_a_loadable_config(tmp_path):
     assert config.reconstruction_backend == "algotom_fbp"
 
 
+def test_write_config_template_batch_produces_a_loadable_batch_config(tmp_path):
+    path = tmp_path / "batch_template.ini"
+    write_config_template(path, batch=True)
+
+    configs = load_config(path)  # should not raise
+
+    assert "project_a" in configs
+    assert configs["project_a"].reconstruction_backend == "algotom_fbp"
+
+
 def test_resolve_config_prefers_explicit_over_sidecar(tmp_path):
     data_path = tmp_path / "scan.h5"
     data_path.write_bytes(b"")

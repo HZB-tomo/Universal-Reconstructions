@@ -313,6 +313,11 @@ See [`ORCHESTRATION.md`](./ORCHESTRATION.md).
   advisory only) and `run_batch()` (runs every config independently;
   one project's failure, predicted by validation or not, never stops
   the rest).
+- `cli.py`: the `tomo` command (`run`/`batch`/`validate`/`init-config`),
+  registered via `pyproject.toml`'s `[project.scripts]`. A thin
+  wrapper -- argument parsing and printing only, no logic of its own
+  beyond converting an exception into a clean one-line error instead
+  of a traceback.
 
 Never blocks on input: with `interactive=False` (the default, and
 always the case for `run_batch()`), a stage that can't resolve

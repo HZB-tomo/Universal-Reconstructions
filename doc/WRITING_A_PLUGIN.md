@@ -119,7 +119,7 @@ the new vendor's layout.
 import h5py
 from tests.fixtures.generate_synthetic import make_volume, project_parallel
 
-def generate(path, shape=(24, 24, 32), n_angles=10, seed=None):
+def generate(path, shape=(32, 24, 24), n_angles=10, seed=None):
     volume = make_volume(shape=shape, seed=seed)
     projections, angles = project_parallel(volume, n_angles=n_angles)
     with h5py.File(path, "w") as f:

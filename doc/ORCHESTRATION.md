@@ -244,8 +244,17 @@ contend for the same resources reconstruction is already saturating,
 without the wall-clock benefit that contention-free parallelism would
 otherwise give.
 
+## Command line
+
+`pip install -e .` registers a `tomo` command (`orchestration/cli.py`):
+`tomo run`/`tomo batch`/`tomo validate`/`tomo init-config`, a thin
+wrapper over the functions above. See [`CLI.md`](./CLI.md) for the full
+reference.
+
 ## See also
 
+- [`CLI.md`](./CLI.md): the `tomo` command in full -- every subcommand,
+  exit codes, example output.
 - [`demo/05_orchestration.ipynb`](./demo/05_orchestration.ipynb): a single
   project, `run_all()` and step-by-step, HDF5 and TIFF.
 - [`demo/06_batch_orchestration.ipynb`](./demo/06_batch_orchestration.ipynb):

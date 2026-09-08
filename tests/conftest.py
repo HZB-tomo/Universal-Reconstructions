@@ -64,7 +64,7 @@ def synthetic_data(tmp_path):
     loaded data actually matches what was written.
     """
     volume, projections, angles = generate(
-        tmp_path / "synthetic", shape=(32, 32, 48), n_angles=20, seed=42
+        tmp_path / "synthetic", shape=(48, 32, 32), n_angles=20, seed=42
     )
     return {
         "dir": tmp_path / "synthetic",

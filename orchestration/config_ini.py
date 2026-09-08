@@ -267,8 +267,44 @@ format = hdf5
 path = {project_id}_volume.h5
 """
 
+_BATCH_TEMPLATE = """\
+# tomo_project batch config template: several projects in one file. See
+# doc/ORCHESTRATION.md's "Batch grammar" section.
+#
+# Sections are [project_id:stage]. [DEFAULT:stage] supplies a value
+# every project inherits unless its own section overrides that key --
+# add more [DEFAULT:stage] entries for anything all your projects share
+# (reconstruction backend, output dtype, ...), and keep each project's
+# own sections to just what's different about it.
+#
+# Copy the [project_a:...] block below (renaming "project_a") for each
+# additional project.
 
-def write_config_template(path: Union[str, Path]) -> None:
-    """Writes a commented, fully-populated example single-project
-    config to `path`, ready to copy and fill in."""
-    Path(path).write_text(_TEMPLATE)
+[DEFAULT:reconstruction]
+backend = algotom_fbp
+
+[DEFAULT:postprocess]
+dtype = float32
+
+[project_a:import]
+path =
+format = hdf5
+
+[project_a:calibration]
+# center =             # blank = auto find_center()
+# tilt_deg =           # blank = auto find_tilt()
+
+[project_a:export]
+format = hdf5
+path = {project_id}_volume.h5
+"""
+
+
+def write_config_template(path: Union[str, Path], batch: bool = False) -> None:
+    """
+    Writes a commented, fully-populated example config to `path`, ready
+    to copy and fill in. `batch=True` writes a batch-shaped skeleton
+    (one example project plus [DEFAULT:stage] sections) instead of a
+    single-project one.
+    """
+    Path(path).write_text(_BATCH_TEMPLATE if batch else _TEMPLATE)

@@ -52,7 +52,7 @@ def write_hypothetical_synchrotron_hdf5(
         f.create_dataset("/entry/instrument/detector/pixel_size", data=pixel_size)
 
 
-def generate(out_path: Path, shape=(64, 64, 96), n_angles=40, n_flats=10, seed=None):
+def generate(out_path: Path, shape=(96, 64, 64), n_angles=40, n_flats=10, seed=None):
     """
     Build a volume, project it, generate matching flat fields, and write
     the whole thing to `out_path` in the hypothetical synchrotron's
@@ -74,6 +74,6 @@ def generate(out_path: Path, shape=(64, 64, 96), n_angles=40, n_flats=10, seed=N
 if __name__ == "__main__":
     generate(
         Path(__file__).parent / "generated" / "hypothetical_synchrotron.h5",
-        shape=(128, 128, 192),
+        shape=(192, 128, 128),
         n_angles=200,
     )

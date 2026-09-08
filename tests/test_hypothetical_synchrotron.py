@@ -14,7 +14,7 @@ from tests.fixtures.generate_hypothetical_synchrotron import generate
 
 def test_detects_hypothetical_synchrotron_plugin(tmp_path):
     path = tmp_path / "beamline_scan.h5"
-    generate(path, shape=(24, 24, 32), n_angles=10, n_flats=4, seed=7)
+    generate(path, shape=(32, 24, 24), n_angles=10, n_flats=4, seed=7)
 
     importer = DataImporter()
     plugin = importer.detect(path, format="hdf5")
@@ -24,7 +24,7 @@ def test_detects_hypothetical_synchrotron_plugin(tmp_path):
 def test_import_hypothetical_synchrotron(tmp_path):
     path = tmp_path / "beamline_scan.h5"
     volume, projections, flats, angles = generate(
-        path, shape=(24, 24, 32), n_angles=10, n_flats=4, seed=7
+        path, shape=(32, 24, 24), n_angles=10, n_flats=4, seed=7
     )
 
     importer = DataImporter()

@@ -4,15 +4,19 @@ pipeline without needing real instrument files.
 
 What gets generated, per the agreed spec:
   - a 3D volume of shape (x, y, z), containing:
-      - a box of size (x//2, y//2, z//3) at a random valid position
+      - a box of size (x//3, y//2, z//2) at a random valid position
       - a sphere of radius min(x,y,z)//3 at a random valid position
   - a parallel-beam projection of that volume from N equally spaced
-    angles between 0 and 180 degrees, rotating around the z axis
+    angles between 0 and 180 degrees, rotating around the x axis (the
+    first axis, unchanged by projection angle -- matching
+    tests/fixtures/realistic_phantom's convention: the first volume
+    axis is the rotation axis, and becomes the row axis of each
+    projection image)
   - saved in BOTH formats our plugins understand:
       - HDF5, matching SyntheticHdf5Plugin's expected layout
       - a TIFF folder + JSON sidecar, matching SyntheticTiffPlugin's
 
-Full-size defaults match the original spec (256, 256, 512) and 800
+Full-size defaults match the original spec (512, 256, 256) and 800
 angles, which is slow to generate (minutes, since it rotates and sums
 the whole volume once per angle). For fast test iteration, pass a
 smaller shape/n_angles -- see the `synthetic_data` fixture in
@@ -28,16 +32,17 @@ import json
 from scipy.ndimage import rotate
 
 
-def make_volume(shape=(256, 256, 512), seed=None) -> np.ndarray:
+def make_volume(shape=(512, 256, 256), seed=None) -> np.ndarray:
     """Build the (x, y, z) volume containing a box and a sphere, each at
-    a random position, per the agreed spec (box: x//2,y//2,z//3; sphere
-    radius: min(shape)//3)."""
+    a random position, per the agreed spec (box: x//3,y//2,z//2; sphere
+    radius: min(shape)//3). x is the rotation axis; see the module
+    docstring."""
     rng = np.random.default_rng(seed)
     x, y, z = shape
     volume = np.zeros(shape, dtype=np.float32)
 
     # box
-    bx, by, bz = x // 2, y // 2, z // 3
+    bx, by, bz = x // 3, y // 2, z // 2
     bx0 = rng.integers(0, x - bx)
     by0 = rng.integers(0, y - by)
     bz0 = rng.integers(0, z - bz)
@@ -58,16 +63,17 @@ def make_volume(shape=(256, 256, 512), seed=None) -> np.ndarray:
 def project_parallel(volume: np.ndarray, n_angles: int) -> tuple[np.ndarray, np.ndarray]:
     """
     Simulate a parallel-beam projection: for each of `n_angles` equally
-    spaced angles (0 to 180 degrees), rotate the volume around the z
-    axis and sum along the beam direction (axis 0) to get one 2D
-    projection image. Returns (projections[n_angles, y, z], angles_deg).
+    spaced angles (0 to 180 degrees), rotate the volume around its
+    first axis (x) and sum along one of the other two (the beam
+    direction) to get one 2D projection image. Returns
+    (projections[n_angles, x, z], angles_deg).
     """
     angles = np.linspace(0, 180, n_angles, endpoint=False)
-    y, z = volume.shape[1], volume.shape[2]
-    projections = np.empty((n_angles, y, z), dtype=np.float32)
+    x, z = volume.shape[0], volume.shape[2]
+    projections = np.empty((n_angles, x, z), dtype=np.float32)
     for i, angle in enumerate(angles):
-        rotated = rotate(volume, angle, axes=(0, 1), reshape=False, order=1)
-        projections[i] = rotated.sum(axis=0)
+        rotated = rotate(volume, angle, axes=(1, 2), reshape=False, order=1)
+        projections[i] = rotated.sum(axis=1)
     return projections, angles
 
 
@@ -91,7 +97,7 @@ def write_tiff_folder(root: Path, projections, angles, operator="synthetic data"
     (root / "metadata.json").write_text(json.dumps(meta, indent=2))
 
 
-def generate(out_dir: Path, shape=(256, 256, 512), n_angles=800, seed=None):
+def generate(out_dir: Path, shape=(512, 256, 256), n_angles=800, seed=None):
     """
     Build the volume, project it, and write BOTH the hdf5 and tiff
     versions under out_dir. Returns (volume, projections, angles) so
@@ -115,5 +121,5 @@ def generate(out_dir: Path, shape=(256, 256, 512), n_angles=800, seed=None):
 
 if __name__ == "__main__":
     # Full-spec generation, exactly as originally described:
-    # 256x256x512 volume, 800 equidistant angles.
-    generate(Path(__file__).parent / "generated" / "full", shape=(128, 128, 256), n_angles=400)
+    # 512x256x256 volume, 800 equidistant angles.
+    generate(Path(__file__).parent / "generated" / "full", shape=(256, 128, 128), n_angles=400)
