@@ -85,6 +85,14 @@ Represents one loaded dataset. Holds:
 
 Exposes `is_ready_for_import()` and `needs_user_input()`.
 
+`export_metadata()` flattens every resolved metadata field into a
+plain dict (excluding fields ending in `_path`, which name a location
+inside the source file and are meaningless once detached from it). For
+feeding into `reconstruction.save_volume()`'s `settings`; see
+`RECONSTRUCTION.md`. `reconstruction/` does not import `core/` for
+this: the flattening happens on the `ProjectObject` side, so the
+caller passes a plain dict either way.
+
 Created only by `DataImporter`.
 
 ### `DataInterface` (`core/data_interface.py`)
@@ -262,6 +270,11 @@ Turns normalized sinograms into reconstructed images. Does not take a
 - `backends/algotom_fbp.py`: the built-in backend, parallel-beam only,
   wrapping `algotom.rec.reconstruction.fbp_reconstruction` (one
   sinogram at a time; this backend loops over the stack).
+- `postprocess.py`: `to_uint16()`, clipping and rescaling a volume to
+  16-bit before export.
+- `export.py`: `save_volume()`, writing a reconstructed volume to disk
+  as a TIFF stack or an HDF5 dataset, with an optional JSON
+  settings/provenance record.
 
 The contract specifies shapes in and out only; how a backend processes
 a batch (loop, native batch call, CPU, GPU) is internal to the backend.
@@ -309,4 +322,7 @@ calibration.find_center() / find_tilt() / centers_for_rows()   -> per-row center
   |
   v
 reconstruction.reconstruct()    sinogram(s) -> image(s), via the chosen backend
+  |
+  v
+reconstruction.save_volume()    write the result to disk (TIFF stack or HDF5)
 ```

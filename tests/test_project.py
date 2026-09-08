@@ -40,3 +40,32 @@ def test_computed_field_overwrite_no_history():
     field = meta.get_field("center_of_rotation")
     assert field.value == 102.5
     assert field.source == "computed"
+
+
+def test_export_metadata_includes_every_resolved_field():
+    meta = MetadataBundle()
+    meta.set("voxel_size", 1.5, tier="mandatory_soft")
+    meta.set_computed("center_of_rotation", 102.5)
+    project = ProjectObject(format="hdf5", storage_mode="ram", metadata=meta)
+
+    exported = project.export_metadata()
+
+    assert exported == {"voxel_size": 1.5, "center_of_rotation": 102.5}
+
+
+def test_export_metadata_excludes_missing_fields():
+    meta = MetadataBundle()
+    meta.set("voxel_size", 1.5, tier="mandatory_soft")
+    meta.declare_missing("geometry_type", tier="mandatory_soft")
+    project = ProjectObject(format="hdf5", storage_mode="ram", metadata=meta)
+
+    assert project.export_metadata() == {"voxel_size": 1.5}
+
+
+def test_export_metadata_excludes_path_fields():
+    meta = MetadataBundle()
+    meta.set("projections_path", "/entry/data", tier="mandatory_hard")
+    meta.set("voxel_size", 1.5, tier="mandatory_soft")
+    project = ProjectObject(format="hdf5", storage_mode="ram", metadata=meta)
+
+    assert project.export_metadata() == {"voxel_size": 1.5}

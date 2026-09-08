@@ -68,6 +68,23 @@ class ProjectObject:
         """See MetadataBundle.missing_soft()."""
         return self.metadata.missing_soft()
 
+    def export_metadata(self) -> dict:
+        """
+        Every resolved metadata field's value, as a plain dict keyed by
+        field name. Excludes fields ending in "_path": those name a
+        dataset's location inside the source file this project was
+        imported from, meaningless once detached from that file.
+
+        Meant to be merged into whatever settings dict a caller passes
+        to reconstruction.save_volume(), e.g.
+        save_volume(volume, path, "hdf5", settings=project.export_metadata()).
+        """
+        return {
+            key: field.value
+            for key, field in self.metadata.all_fields().items()
+            if not field.is_missing and not key.endswith("_path")
+        }
+
     def close(self):
         """
         Release any open file resource (e.g. an open h5py.File when
