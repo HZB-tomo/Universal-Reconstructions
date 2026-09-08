@@ -6,9 +6,9 @@ with center-of-rotation deviation, rotation-axis tilt, flat/dark-field
 defects, and noise, all controllable and all with a known ground
 truth.
 
-Depends only on `numpy`/`scipy`, plus `h5py` inside `write_hdf5()`.
-`to_project_object()` is the one place it reaches into the main
-package.
+Depends only on `numpy`/`scipy`, plus `h5py` inside `write_hdf5()` and
+`tifffile` inside `write_tiff()`. `to_project_object()` is the one
+place it reaches into the main package.
 
 ## The phantom
 
@@ -59,7 +59,7 @@ same detector position in every angle.
 ## Usage
 
 ```python
-from tests.fixtures.realistic_phantom import generate, write_hdf5, to_project_object
+from tests.fixtures.realistic_phantom import generate, write_hdf5, write_tiff, to_project_object
 
 phantom = generate(
     shape=(64, 96, 96), n_angles=200,
@@ -81,11 +81,16 @@ project = to_project_object(phantom)
 write_hdf5(phantom, "phantom.h5")
 from data_import.importer import DataImporter
 project = DataImporter().import_project("phantom.h5", format="hdf5", storage_mode="ram")
+
+# Or as a folder of TIFF files, same phantom:
+write_tiff(phantom, "phantom_tiff")
+project = DataImporter().import_project("phantom_tiff", format="tiff", storage_mode="ram")
 ```
 
-The written file uses the layout
+Both use the layout
 [`data_import/vendors/generic_parallel_synchrotron.py`](../data_import/vendors/generic_parallel_synchrotron.py)'s
-plugin expects, registered and detected like any other vendor plugin.
+two plugins (`generic_parallel_synchrotron_hdf5`, `generic_parallel_synchrotron_tiff`)
+expect, registered and detected like any other vendor plugin.
 
 Checking a result against ground truth:
 

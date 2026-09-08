@@ -93,15 +93,14 @@ class DataImporter:
         Args:
             path: file path (hdf5) or folder path (tiff).
             format: "hdf5" or "tiff".
-            storage_mode: "ram" or "disk". "disk" is only valid for
-                hdf5; requesting it for tiff raises ValueError.
+            storage_mode: "ram" or "disk". "disk" mode for either
+                format never reads pixel data until something asks for
+                it (see core/handles.py's Hdf5DiskHandle/TiffDiskHandle);
+                cheap to use for a metadata-only check.
             plugin: normally None, triggering automatic detect(). Pass
                 an explicit plugin instance to skip detection.
         """
         backend = _BACKENDS[format]
-        if format == "tiff" and storage_mode == "disk":
-            raise ValueError("TIFF projects are always RAM-backed; use storage_mode='ram'.")
-
         opened = backend.open(path)
 
         selected_plugin = plugin or self.detect(path, format, opened=opened)

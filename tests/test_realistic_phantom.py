@@ -11,7 +11,7 @@ import numpy as np
 from core.data_interface import DataInterface
 from data_import.importer import DataImporter
 from preprocessing import build_reference, normalize
-from tests.fixtures.realistic_phantom import generate, to_project_object, write_hdf5
+from tests.fixtures.realistic_phantom import generate, to_project_object, write_hdf5, write_tiff
 
 
 def _small(**overrides):
@@ -98,6 +98,38 @@ def test_write_hdf5_round_trips_through_the_real_plugin(tmp_path):
     # respectively), but raw import only reconciles, it doesn't run
     # completion -- so they're correctly still missing at this point.
     assert set(project.missing_soft_fields()) == {"angle_span", "detector_pixel_size"}
+
+
+def test_write_tiff_round_trips_through_the_real_plugin(tmp_path):
+    phantom = _small()
+    out_dir = tmp_path / "phantom_tiff"
+    write_tiff(phantom, out_dir)
+
+    importer = DataImporter()
+    plugin = importer.detect(out_dir, format="tiff")
+    assert plugin.name == "generic_parallel_synchrotron_tiff"
+
+    project = importer.import_project(out_dir, format="tiff", storage_mode="ram")
+    di = DataInterface(project)
+    np.testing.assert_allclose(di.get_projections(), phantom.projections, rtol=1e-5)
+    np.testing.assert_allclose(di.get_flats(), phantom.flat_field, rtol=1e-5)
+    np.testing.assert_allclose(di.get_darks(), phantom.dark_field, rtol=1e-5)
+    np.testing.assert_allclose(di.get_metadata("angles"), phantom.angles, rtol=1e-5)
+    assert di.get_metadata("geometry_type") == "parallel"
+    assert di.get_metadata("voxel_size") == phantom.voxel_size
+
+
+def test_write_tiff_disk_mode_never_loads_the_full_stack_eagerly(tmp_path):
+    from core.handles import TiffDiskHandle
+
+    phantom = _small()
+    out_dir = tmp_path / "phantom_tiff"
+    write_tiff(phantom, out_dir)
+
+    project = DataImporter().import_project(out_dir, format="tiff", storage_mode="disk")
+
+    assert isinstance(project.data_handles["projections"], TiffDiskHandle)
+    assert project.data_handles["projections"].shape == phantom.projections.shape
 
 
 def test_forward_model_is_consistent_with_normalize(tmp_path):

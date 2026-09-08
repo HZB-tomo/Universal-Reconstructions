@@ -8,7 +8,7 @@ import numpy as np
 
 from data_import.importer import DataImporter
 from core.data_interface import DataInterface
-from core.handles import RamHandle, Hdf5DiskHandle
+from core.handles import RamHandle, Hdf5DiskHandle, TiffDiskHandle
 
 
 def test_import_hdf5_ram(synthetic_data):
@@ -68,12 +68,60 @@ def test_import_tiff_ram(synthetic_data):
     assert di.get_metadata("operator") == "synthetic data"
 
 
-def test_import_tiff_disk_mode_rejected(synthetic_data):
-    import pytest
-
+def test_import_tiff_disk(synthetic_data):
     importer = DataImporter()
-    with pytest.raises(ValueError):
-        importer.import_project(synthetic_data["tiff_path"], format="tiff", storage_mode="disk")
+    project = importer.import_project(synthetic_data["tiff_path"], format="tiff", storage_mode="disk")
+
+    assert isinstance(project.data_handles["projections"], TiffDiskHandle)
+    di = DataInterface(project)
+    # slicing should work without loading the whole stack into memory
+    first_angle = di.get_projections(index=0)
+    assert first_angle.shape == synthetic_data["projections"].shape[1:]
+
+    proj = di.get_projections()
+    assert proj.shape == synthetic_data["projections"].shape
+    np.testing.assert_allclose(proj, synthetic_data["projections"], rtol=1e-4, atol=1e-3)
+
+
+def test_import_tiff_disk_supports_multi_axis_tuple_indexing(synthetic_data):
+    """
+    preprocessing.normalize_rows() indexes get_projections() with a
+    3-tuple (slice(None), rows, slice(None)): every angle, a row
+    subset, every column. h5py.Dataset.__getitem__ handles this
+    natively for Hdf5DiskHandle; TiffDiskHandle has to do it itself
+    since it only has a plain list of file paths, not an array.
+    """
+    importer = DataImporter()
+    project = importer.import_project(synthetic_data["tiff_path"], format="tiff", storage_mode="disk")
+    di = DataInterface(project)
+
+    rows = slice(1, 3)
+    subset = di.get_projections(index=(slice(None), rows, slice(None)))
+
+    expected = synthetic_data["projections"][:, rows, :]
+    assert subset.shape == expected.shape
+    np.testing.assert_allclose(subset, expected, rtol=1e-4, atol=1e-3)
+
+
+def test_import_tiff_disk_shape_matches_the_full_stack(synthetic_data):
+    importer = DataImporter()
+    project = importer.import_project(synthetic_data["tiff_path"], format="tiff", storage_mode="disk")
+
+    assert project.data_handles["projections"].shape == synthetic_data["projections"].shape
+
+
+def test_import_tiff_disk_materialize_to_ram(synthetic_data):
+    importer = DataImporter()
+    project = importer.import_project(synthetic_data["tiff_path"], format="tiff", storage_mode="disk")
+    di = DataInterface(project)
+
+    di.materialize_to_ram()
+
+    assert project.storage_mode == "ram"
+    assert isinstance(project.data_handles["projections"], RamHandle)
+    np.testing.assert_allclose(
+        project.data_handles["projections"].get(), synthetic_data["projections"], rtol=1e-4, atol=1e-3
+    )
 
 
 def test_import_reconciles_fields_no_plugin_mentions(synthetic_data):

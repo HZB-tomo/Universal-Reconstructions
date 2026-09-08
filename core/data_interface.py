@@ -63,10 +63,9 @@ class DataInterface:
         """
         Convert every disk-backed handle in this project to a RAM
         handle, and update storage_mode accordingly. One-directional.
+        Handles already in RAM are left as-is (DataHandle.materialize()
+        is a no-op for RamHandle).
         """
-        from core.handles import Hdf5DiskHandle
-
         for key, handle in list(self.project.data_handles.items()):
-            if isinstance(handle, Hdf5DiskHandle):
-                self.project.data_handles[key] = handle.materialize()
+            self.project.data_handles[key] = handle.materialize()
         self.project.storage_mode = "ram"

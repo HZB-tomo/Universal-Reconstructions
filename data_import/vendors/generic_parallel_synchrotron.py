@@ -1,24 +1,35 @@
 """
-Vendor plugin for a generic parallel-beam synchrotron HDF5 layout.
-Paired with tests/fixtures/realistic_phantom/, which writes files in
-this layout, so a generated phantom file can be imported through the
-normal DataImporter pipeline.
+Vendor plugins for a generic parallel-beam synchrotron layout, HDF5 and
+TIFF. Paired with tests/fixtures/realistic_phantom/, which writes files
+in these layouts (write_hdf5()/write_tiff()), so a generated phantom
+can be imported through the normal DataImporter pipeline.
 
-Always has both flat and dark fields, and is always parallel-beam,
-both known unconditionally from the vendor's convention.
+Both always have flat and dark fields, and are always parallel-beam,
+known unconditionally from the vendor's convention.
 
+HDF5:
     /entry/instrument/detector/data           projections, 3D
     /entry/instrument/detector/flat_fields    flat fields, 3D
     /entry/instrument/detector/dark_fields    dark fields, 3D
     /entry/instrument/sample/rotation_angle   angles, 1D, degrees
     /entry/instrument/detector/pixel_size     voxel size, scalar
     root attribute: beamline == "generic_parallel_synchrotron"
+
+TIFF (a folder):
+    projections/*.tif   projections, one file per angle
+    flats/*.tif         flat fields, one file per frame
+    darks/*.tif         dark fields, one file per frame
+    metadata.json        {"angles": [...], "voxel_size": ...}
 """
 from __future__ import annotations
 
+import json
+
+import numpy as np
+
 from data_import.plugin import ImportPlugin, register_plugin
 from data_import.path_map import PathMap
-from data_import.signature import Hdf5Signature
+from data_import.signature import Hdf5Signature, TiffSignature
 from core.metadata import MetadataBundle
 
 _PROJECTIONS = "/entry/instrument/detector/data"
@@ -55,6 +66,47 @@ class GenericParallelSynchrotronHdf5Plugin(ImportPlugin):
 
         bundle.set("angles", handle[_ANGLES][()], tier="mandatory_soft")
         bundle.set("voxel_size", handle[_PIXEL_SIZE][()], tier="mandatory_soft", source="file")
+        bundle.set("geometry_type", "parallel", tier="mandatory_soft", source="file")
+
+        bundle.declare_missing("center_of_rotation", tier="computed")
+        bundle.declare_missing("tilt_angle", tier="computed")
+
+        return bundle
+
+
+@register_plugin
+class GenericParallelSynchrotronTiffPlugin(ImportPlugin):
+    name = "generic_parallel_synchrotron_tiff"
+    format = "tiff"
+
+    signature = TiffSignature(
+        required_sidecar_patterns=["metadata.json", "flats/*.tif*", "darks/*.tif*"],
+        required_sidecar_keys={"metadata.json": ["angles", "voxel_size"]},
+        min_file_count=1,
+    )
+
+    def get_path_map(self, handle) -> PathMap:
+        return PathMap(
+            projections="projections/*.tif*",
+            flats="flats/*.tif*",
+            darks="darks/*.tif*",
+            metadata_source="metadata.json",
+        )
+
+    def parse_metadata(self, handle, path_map: PathMap) -> MetadataBundle:
+        bundle = MetadataBundle()
+
+        bundle.set("projections_path", path_map.projections, tier="mandatory_hard")
+        bundle.set("flats_path", path_map.flats, tier="mandatory_hard")
+        bundle.set("darks_path", path_map.darks, tier="mandatory_hard")
+
+        # `handle` is the folder Path (see backend.py's TiffBackend.open).
+        sidecar = next(handle.rglob(path_map.metadata_source), None)
+        data = json.loads(sidecar.read_text()) if sidecar is not None else {}
+
+        angles = data.get("angles")
+        bundle.set("angles", np.asarray(angles) if angles is not None else None, tier="mandatory_soft", source="file")
+        bundle.set("voxel_size", data.get("voxel_size"), tier="mandatory_soft", source="file")
         bundle.set("geometry_type", "parallel", tier="mandatory_soft", source="file")
 
         bundle.declare_missing("center_of_rotation", tier="computed")

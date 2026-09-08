@@ -28,9 +28,9 @@ print(project)
 
 `storage_mode` controls whether projection/flat/dark arrays are read
 fully into memory (`"ram"`) or left on disk and read lazily
-(`"disk"`). `"disk"` only works for hdf5; tiff data is always loaded
-into RAM, and `storage_mode="disk"` for a tiff project raises
-`ValueError`.
+(`"disk"`). Both formats support both modes: `"disk"` never reads
+pixel data until something asks for it, so it's cheap to use even just
+to check a file's metadata.
 
 ### If the file isn't recognized
 

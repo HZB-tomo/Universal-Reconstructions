@@ -102,6 +102,22 @@ def get_plugins(format: Literal["hdf5", "tiff"]) -> list[ImportPlugin]:
     return list(_REGISTRY[format])
 
 
+def get_plugin(format: Literal["hdf5", "tiff"], name: str) -> ImportPlugin:
+    """
+    A specific registered plugin by name, bypassing detect(). For
+    disambiguating when more than one plugin could otherwise match a
+    file (e.g. two versions of the same vendor's layout).
+
+    Raises ValueError if no plugin of that format is registered under
+    that name.
+    """
+    for plugin in _REGISTRY[format]:
+        if plugin.name == name:
+            return plugin
+    known = [p.name for p in _REGISTRY[format]]
+    raise ValueError(f"No {format} plugin named '{name}'. Registered: {known}")
+
+
 def clear_registry():
     """Empty the registry. Used by tests."""
     _REGISTRY["hdf5"].clear()

@@ -109,6 +109,38 @@ def write_hdf5(phantom: PhantomProject, out_path) -> None:
         f.create_dataset("/entry/instrument/detector/pixel_size", data=phantom.voxel_size)
 
 
+def write_tiff(phantom: PhantomProject, out_dir) -> None:
+    """
+    Serialize a PhantomProject to a folder in the layout
+    data_import/vendors/generic_parallel_synchrotron.py's TIFF plugin
+    expects: projections/flats/darks subfolders of per-frame TIFF
+    files, plus a metadata.json sidecar (angles, voxel_size). The
+    folder can be imported through DataImporter.import_project() like
+    a real vendor folder.
+    """
+    import json
+
+    import tifffile
+    from pathlib import Path
+
+    out_dir = Path(out_dir)
+    for subfolder, stack in [
+        ("projections", phantom.projections),
+        ("flats", phantom.flat_field),
+        ("darks", phantom.dark_field),
+    ]:
+        folder = out_dir / subfolder
+        folder.mkdir(parents=True, exist_ok=True)
+        n_digits = max(5, len(str(stack.shape[0] - 1)))
+        for i, frame in enumerate(stack):
+            tifffile.imwrite(folder / f"frame_{i:0{n_digits}d}.tif", frame)
+
+    (out_dir / "metadata.json").write_text(json.dumps({
+        "angles": phantom.angles.tolist(),
+        "voxel_size": phantom.voxel_size,
+    }))
+
+
 def to_project_object(phantom: PhantomProject):
     """
     Build a core.project.ProjectObject directly from a PhantomProject,

@@ -4,7 +4,7 @@ How the codebase is organized and how data flows through it.
 
 ## The big picture
 
-Six packages:
+Seven packages:
 
 ```
 core/            the shared data model
@@ -13,6 +13,8 @@ completion/      fills in metadata a vendor's file didn't provide
 preprocessing/   turns raw projections into reconstruction-ready sinograms
 calibration/     finds center-of-rotation and rotation-axis tilt
 reconstruction/  turns sinograms into reconstructed images
+orchestration/   drives one or many projects through every stage above,
+                 configured by a ProjectConfig; see ORCHESTRATION.md
 ```
 
 `core/` defines a loaded dataset (`ProjectObject`), how data is read
@@ -33,6 +35,12 @@ are the pipeline stages after import; see
 
 `calibration/` and `reconstruction/` do not depend on `core/` and do
 not take a `ProjectObject`; see their sections below.
+
+`orchestration/` is the only package allowed to depend on all the
+others -- it is what actually chains import through export into one
+run. None of the packages above depend on it back, so each stays
+independently testable and usable stage-by-stage without pulling in
+the orchestrator at all, exactly as `USING_THE_PIPELINE.md` describes.
 
 ## `core/` in detail
 
@@ -65,11 +73,14 @@ Array data (projections, flats, darks) is wrapped in a `DataHandle`:
 - `RamHandle`: a numpy array in memory.
 - `Hdf5DiskHandle`: a reference to an open `h5py.Dataset`, read from
   disk on access.
+- `TiffDiskHandle`: a sorted list of per-slice file paths; `.shape`
+  reads only the first file's header, `.get()` reads only the files it
+  needs.
 
-Both expose the same interface (`.get()`, `.shape`, `.storage_mode`).
-
-TIFF data is always a `RamHandle`; TIFF folders are fully loaded into
-memory at import time.
+All three expose the same interface (`.get()`, `.shape`,
+`.storage_mode`, `.materialize()` -> a `RamHandle`; a no-op on
+`RamHandle` itself). Both formats support `storage_mode="ram"` and
+`storage_mode="disk"`.
 
 ### `ProjectObject` (`core/project.py`)
 
@@ -279,6 +290,34 @@ Turns normalized sinograms into reconstructed images. Does not take a
 The contract specifies shapes in and out only; how a backend processes
 a batch (loop, native batch call, CPU, GPU) is internal to the backend.
 
+## `orchestration/` in detail
+
+Drives one project through every stage above, or many independently.
+See [`ORCHESTRATION.md`](./ORCHESTRATION.md).
+
+- `config.py`: `ProjectConfig` (one project's settings, grouped by
+  stage) and `PipelineStageError`, the one exception type every stage
+  raises.
+- `pipeline.py`: `PipelineRun`, whose seven stage methods
+  (`import_data()`, `complete()`, `preprocess()`, `calibrate()`,
+  `reconstruct()`, `postprocess()`, `export()`) are each independently
+  callable and store their result on the instance; `run_all()` chains
+  all seven and returns a `PipelineResult` instead of raising.
+  `calibrate()` is the one stage that writes back onto the imported
+  `ProjectObject`: `center_of_rotation`/`tilt_angle`, via
+  `MetadataBundle.set_computed()`.
+- `config_ini.py`: `load_config()`/`write_config_template()`/
+  `resolve_config()`, reading/writing `ProjectConfig` as hand-editable
+  INI text, single-project or batch grammar.
+- `batch.py`: `validate_config()` (a cheap dry-run through calibration,
+  advisory only) and `run_batch()` (runs every config independently;
+  one project's failure, predicted by validation or not, never stops
+  the rest).
+
+Never blocks on input: with `interactive=False` (the default, and
+always the case for `run_batch()`), a stage that can't resolve
+something it needs raises `PipelineStageError` rather than prompting.
+
 ## Data flow, end to end
 
 ```
@@ -326,3 +365,7 @@ reconstruction.reconstruct()    sinogram(s) -> image(s), via the chosen backend
   v
 reconstruction.save_volume()    write the result to disk (TIFF stack or HDF5)
 ```
+
+`orchestration.PipelineRun` runs this same sequence end to end for one
+`ProjectConfig`; `orchestration.run_batch()` runs it independently for
+many.

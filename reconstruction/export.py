@@ -80,6 +80,9 @@ def _save_tiff_stack(volume: np.ndarray, folder: Path, settings: Optional[dict])
     import tifffile  # imported here so this package stays importable without tifffile installed
 
     folder.mkdir(parents=True, exist_ok=True)
+    for stale in folder.glob("slice_*.tif"):
+        stale.unlink()
+
     n_digits = max(5, len(str(volume.shape[0] - 1)))
     for i, image in enumerate(volume):
         tifffile.imwrite(folder / f"slice_{i:0{n_digits}d}.tif", image)

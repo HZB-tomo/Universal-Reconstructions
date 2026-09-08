@@ -111,4 +111,5 @@ sys.path.insert(0, str(project_root))
 
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 - [`USING_THE_PIPELINE.md`](./USING_THE_PIPELINE.md)
+- [`ORCHESTRATION.md`](./ORCHESTRATION.md)
 - [`WRITING_A_PLUGIN.md`](./WRITING_A_PLUGIN.md)

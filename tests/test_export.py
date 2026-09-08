@@ -40,6 +40,19 @@ def test_save_volume_pads_a_single_2d_image_to_a_one_slice_stack(tmp_path):
     np.testing.assert_array_equal(tifffile.imread(files[0]), image)
 
 
+def test_save_volume_tiff_clears_stale_slices_from_a_previous_larger_export(tmp_path):
+    pytest.importorskip("tifffile")
+
+    folder = tmp_path / "out"
+    save_volume(np.zeros((5, 2, 2), dtype=np.float32), folder, format="tiff")
+    assert len(list(folder.glob("slice_*.tif"))) == 5
+
+    save_volume(np.zeros((2, 2, 2), dtype=np.float32), folder, format="tiff")
+
+    files = sorted(folder.glob("slice_*.tif"))
+    assert len(files) == 2
+
+
 def test_save_volume_tiff_output_round_trips_through_the_tiff_backend(tmp_path):
     pytest.importorskip("tifffile")
     from data_import.backend import TiffBackend

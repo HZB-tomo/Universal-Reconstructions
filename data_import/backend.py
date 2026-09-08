@@ -12,7 +12,7 @@ from typing import Literal
 
 import numpy as np
 
-from core.handles import DataHandle, RamHandle, Hdf5DiskHandle
+from core.handles import DataHandle, RamHandle, Hdf5DiskHandle, TiffDiskHandle
 
 
 class FormatBackend(ABC):
@@ -65,9 +65,8 @@ class Hdf5Backend(FormatBackend):
 
 
 class TiffBackend(FormatBackend):
-    """Reads a folder of TIFF files into a stacked numpy array. TIFF
-    data is always fully loaded into RAM; build_data_handle() always
-    returns a RamHandle."""
+    """Reads a folder of TIFF files as a stack, in RAM or disk (lazy)
+    mode. Has no knowledge of which vendor wrote a file."""
 
     format = "tiff"
 
@@ -75,12 +74,16 @@ class TiffBackend(FormatBackend):
         return Path(path)
 
     def build_data_handle(self, opened: Path, internal_path: str, storage_mode: str) -> DataHandle:
-        import tifffile  # imported here so this package stays importable without tifffile installed
-
         # internal_path is a glob pattern relative to `opened`, e.g. "projections/*.tif"
         files = sorted(opened.glob(internal_path))
         if not files:
             raise FileNotFoundError(f"No files matched pattern '{internal_path}' under {opened}")
+
+        if storage_mode == "disk":
+            return TiffDiskHandle(files)
+
+        import tifffile  # imported here so this package stays importable without tifffile installed
+
         stack = np.stack([tifffile.imread(f) for f in files], axis=0)
         return RamHandle(stack)
 
