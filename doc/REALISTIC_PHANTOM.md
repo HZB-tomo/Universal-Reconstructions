@@ -47,7 +47,8 @@ same detector position in every angle.
 | `n_angles`, `n_flats`, `n_darks` | how many of each frame to generate |
 | `cor_deviation` | center-of-rotation offset at the middle row, pixels |
 | `tilt_deg` | rotation-axis tilt (axis lean), degrees; the effective center drifts linearly with row |
-| `attenuation_scale` | converts the phantom's unitless density into optical depth |
+| `attenuation_scale` | converts the phantom's unitless density into optical depth; `None` (default) solves for it so the single most-attenuating ray transmits `target_min_transmission` of the free beam, matching how a real acquisition's exposure is set up (see `simulate.py`'s `attenuation_scale_for_min_transmission()`) |
+| `target_min_transmission` | the worst-case ray's transmission fraction `attenuation_scale` is solved for; default `0.14`, matching real CT practice (at least ~10-15%) |
 | `flat_intensity` | nominal flat-field brightness |
 | `dark_level` | nominal dark-field offset |
 | `inhomogeneity_strength` | smooth, low-frequency detector gain variation |
