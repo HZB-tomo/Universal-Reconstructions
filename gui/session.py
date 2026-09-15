@@ -16,6 +16,12 @@ class ProjectSession:
     config: ProjectConfig
     run: Optional[PipelineRun] = None
     checked: bool = False
+    # Set by MainWindow._reconstruct_selected() on success: run_batch()
+    # builds its own internal PipelineRun per config and doesn't hand
+    # back the volume, so session.run.volume (what _status_of() checks
+    # for a single-project reconstruct) never gets populated that way --
+    # this is the equivalent signal for the batch path.
+    exported: bool = False
     # None until AdjustmentPanel knows this project's row count and
     # resolves it to the middle row -- see _refresh_from_session().
     preview_row: Optional[int] = None

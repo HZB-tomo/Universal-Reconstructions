@@ -47,6 +47,7 @@ MAX_PLAUSIBLE_TILT_DEG = 1.0
 
 class BasicSettingsTab(QWidget):
     geometry_type_changed = Signal(str)
+    angle_span_changed = Signal(float)
     slice_changed = Signal(int)
     backend_changed = Signal(str)
     center_changed = Signal(float)
@@ -59,6 +60,18 @@ class BasicSettingsTab(QWidget):
         self.geometry_combo = QComboBox(self)
         self.geometry_combo.addItems(["", "parallel", "cone"])
         self.geometry_combo.currentTextChanged.connect(self.geometry_type_changed)
+
+        # Only the span (end - start) is what completion/derivers.py's
+        # derive_angles() actually consumes -- angles are always built
+        # as np.linspace(0, angle_span, n, endpoint=False), so an
+        # absolute start angle would have no effect on the result. One
+        # field, not a start/end pair, so there's nothing to silently
+        # discard.
+        self.angle_span_spin = QDoubleSpinBox(self)
+        self.angle_span_spin.setRange(0.0, 360.0)
+        self.angle_span_spin.setDecimals(2)
+        self.angle_span_spin.setSuffix(" deg")
+        self.angle_span_spin.valueChanged.connect(self.angle_span_changed)
 
         self.slice_spin = QSpinBox(self)
         self.slice_spin.setMaximum(1_000_000)
@@ -83,6 +96,7 @@ class BasicSettingsTab(QWidget):
 
         form = QFormLayout()
         form.addRow("Geometry type", self.geometry_combo)
+        form.addRow("Angle span", self.angle_span_spin)
         form.addRow("Slice (z)", self.slice_spin)
         form.addRow("Reconstruction algorithm", self.backend_combo)
         form.addRow("Center of rotation", self.center_spin)
@@ -93,7 +107,7 @@ class BasicSettingsTab(QWidget):
         layout.addWidget(load_config_btn)
         layout.addStretch()
 
-    def set_values(self, geometry_type: str, slice_index: int, slice_max: int, backend: str, center: float, tilt_deg: float, width: int) -> None:
+    def set_values(self, geometry_type: str, angle_span: float, angle_span_derived: bool, slice_index: int, slice_max: int, backend: str, center: float, tilt_deg: float, width: int) -> None:
         # setMaximum()/setRange() below can themselves clamp the
         # widget's current (still the *previous* session's) value and
         # emit valueChanged synchronously -- by the time that fires,
@@ -117,6 +131,19 @@ class BasicSettingsTab(QWidget):
             self.center_spin.setValue(center)
 
         self._silently(self.geometry_combo, lambda: self.geometry_combo.setCurrentText(geometry_type))
+        self._silently(self.angle_span_spin, lambda: self.angle_span_spin.setValue(angle_span))
+        # angle_span_derived means the file's own recorded angles already
+        # give an exact value (e.g. 179.55 deg for a 400-projection,
+        # endpoint=False 180 deg scan -- correct, not a rounding bug: see
+        # completion/derivers.py's derive_angle_span()) -- editing it here
+        # would have no effect until a re-import anyway, and greying it out
+        # says so instead of inviting a pointless edit.
+        self.angle_span_spin.setEnabled(not angle_span_derived)
+        self.angle_span_spin.setToolTip(
+            "Derived from this project's own recorded per-projection angles (max - min). Read-only."
+            if angle_span_derived
+            else "Not recorded by this project's plugin. Enter the scan's total angular sweep so per-projection angles can be derived."
+        )
         self._silently(self.slice_spin, _set_slice)
         self._silently(self.backend_combo, lambda: self.backend_combo.setCurrentText(backend))
         self._silently(self.center_spin, _set_center)
@@ -244,6 +271,7 @@ class AdjustmentPanel(QWidget):
         layout.addLayout(recon_row)
 
         self.basic_tab.geometry_type_changed.connect(self._on_geometry_type_changed)
+        self.basic_tab.angle_span_changed.connect(self._on_angle_span_changed)
         self.basic_tab.slice_changed.connect(self._on_slice_changed)
         self.basic_tab.backend_changed.connect(self._on_backend_changed)
         self.basic_tab.center_changed.connect(self._on_center_changed)
@@ -273,10 +301,19 @@ class AdjustmentPanel(QWidget):
 
         n_rows, width = 1, 0
         geometry_type = ""
+        angle_span = 180.0  # the common case (a half-turn scan); overridden below if known
+        angle_span_derived = False  # True once a real, already-known value is shown (read-only)
         if project is not None:
             di = DataInterface(project)
             _, n_rows, width = di.shape_of("projections")
             geometry_type = di.get_metadata("geometry_type") or ""
+            resolved_span = di.get_metadata("angle_span")
+            if resolved_span is not None:
+                angle_span = resolved_span
+                angle_span_derived = True
+        if "angle_span" in config.completion_answers:
+            angle_span = config.completion_answers["angle_span"]  # a value the user already typed wins over the file's
+            angle_span_derived = False  # still an editable answer, not yet re-resolved from data
 
         if config.center is None and width:
             # No offset is the only defensible guess before Find COR has
@@ -288,6 +325,8 @@ class AdjustmentPanel(QWidget):
 
         self.basic_tab.set_values(
             geometry_type=geometry_type,
+            angle_span=angle_span,
+            angle_span_derived=angle_span_derived,
             slice_index=session.preview_row or 0,
             slice_max=n_rows - 1,
             backend=config.reconstruction_backend,
@@ -303,6 +342,10 @@ class AdjustmentPanel(QWidget):
         if self.session is None or not value:
             return
         self.session.config.completion_answers["geometry_type"] = value
+
+    def _on_angle_span_changed(self, value: float) -> None:
+        if self.session is not None:
+            self.session.config.completion_answers["angle_span"] = value
 
     def _on_slice_changed(self, value: int) -> None:
         if self.session is not None:
@@ -457,6 +500,7 @@ class AdjustmentPanel(QWidget):
             else:
                 self.viewer.show_image(volume[0])
             self.status_message.emit(f"reconstructed {session.project_id}: {volume.shape}")
+            self.session_changed.emit(session)  # picks up the new "reconstructed" status color
 
         def failed(exc: Exception) -> None:
             self.busy_changed.emit(False)

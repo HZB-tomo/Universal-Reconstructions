@@ -11,11 +11,13 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDockWidget, QMainWindow, QProgressBar
 
 from core.data_interface import DataInterface
+from data_import.errors import AmbiguousVendorMatchError, NoVendorMatchError
 from orchestration import BatchReport, PipelineRun, PipelineStageError, ProjectConfig, run_batch
 
 from gui import ram_check
 from gui.adjustment_panel import AdjustmentPanel
 from gui.import_dialog import ImportDialog
+from gui.plugin_picker_dialog import PluginPickerDialog
 from gui.project_panel import ProjectPanel
 from gui.session import ProjectSession, unique_project_id
 from gui.viewer import ImageViewer
@@ -145,9 +147,31 @@ class MainWindow(QMainWindow):
             session.error = str(exc)
             self.project_panel.refresh(session)
             self._show_status(f"import failed for {session.project_id}: {exc}")
+            # session.config.plugin_name already set means the user
+            # already picked once for this session and it still failed
+            # -- offer again (with Cancel), regardless of the new
+            # exception type, rather than only on the original
+            # detection failure.
+            if session.config.plugin_name is not None or isinstance(exc.__cause__, (NoVendorMatchError, AmbiguousVendorMatchError)):
+                self._offer_plugin_picker(session)
 
         self._push_busy()
         self._workers.append(run_in_background(work, on_finished=done, on_failed=failed))
+
+    def _offer_plugin_picker(self, session: ProjectSession) -> None:
+        dialog = PluginPickerDialog(session.config.format, session.project_id, session.error or "", self)
+        if not dialog.exec():
+            # Cancel -- no plugin is ever going to open this file. It was
+            # only ever in the list provisionally, as an "importing"
+            # placeholder; giving up removes it rather than leaving a
+            # permanently-broken row behind.
+            self._show_status(f"removed {session.project_id}: no plugin available")
+            self.project_panel.remove_session(session)
+            return
+        session.config.plugin_name = dialog.selected_plugin_name()
+        session.error = None
+        self.project_panel.refresh(session)
+        self._import_session(session)  # retry; failed() loops back here again if this plugin doesn't work either
 
     # -- reconstructing every checked project ------------------------------------
 
@@ -181,10 +205,17 @@ class MainWindow(QMainWindow):
         if not configs:
             return
 
+        sessions_by_id = {s.project_id: s for s in checked}
+
         def done(report: BatchReport) -> None:
             self._pop_busy()
             succeeded = [r.project_id for r in report.succeeded]
             failed_results = [(r.project_id, r.error) for r in report.failed]
+            for project_id in succeeded:
+                session = sessions_by_id.get(project_id)
+                if session is not None:
+                    session.exported = True
+                    self.project_panel.refresh(session)
             message = f"reconstruct selected: {len(succeeded)} succeeded"
             if failed_results:
                 message += f", {len(failed_results)} failed (" + "; ".join(f"{pid}: {err}" for pid, err in failed_results) + ")"
@@ -202,7 +233,10 @@ class MainWindow(QMainWindow):
 
     def _open_project(self, session: ProjectSession) -> None:
         if not session.imported:
-            self._show_status(f"{session.project_id} is still importing")
+            if session.error is not None:
+                self._show_status(f"{session.project_id} failed to import: {session.error}")
+            else:
+                self._show_status(f"{session.project_id} is still importing")
             return
         di = DataInterface(session.run.project)
         n_angles = di.shape_of("projections")[0]

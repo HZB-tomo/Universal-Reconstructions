@@ -105,6 +105,47 @@ background (`_import_session()`). A `PipelineStageError` from
 selectable, and the missing field gets a chance to be filled in via
 Basic settings before the next reconstruct attempt retries `complete()`.
 
+### Plugin picker
+
+`import_data()` failing is different: `PipelineRun.import_data()`
+wraps every import-time exception (`NoVendorMatchError`,
+`AmbiguousVendorMatchError`, `ProjectImportError`, `ValueError`) into
+one generic `PipelineStageError`, but `raise ... from e` preserves the
+original as `.__cause__`, so `_import_session()`'s `failed()` can still
+tell them apart without touching backend code.
+
+On the *first* failure, `PluginPickerDialog` (`gui/plugin_picker_dialog.py`)
+is offered only when the cause was `NoVendorMatchError`/`AmbiguousVendorMatchError`
+-- detection genuinely didn't resolve, as opposed to a plugin being
+found but the file lacking what it needs (`ProjectImportError`), which
+picking a different plugin can't fix either way. It lists
+`get_plugins(session.config.format)` by name; picking one sets
+`session.config.plugin_name` (bypassing `detect()` entirely on retry,
+the same escape hatch `ProjectConfig.plugin_name` already existed for)
+and calls `_import_session()` again. Cancel calls
+`ProjectPanel.remove_session()` -- the row was only ever in the list
+provisionally, as an "importing" placeholder, and giving up means no
+plugin is ever going to open this file, so there is nothing left to
+show a permanently-red row for.
+
+If that retry *also* fails, `failed()` offers the picker again
+regardless of the new exception type -- once `session.config.plugin_name`
+is set, any further failure means the user's own pick didn't work
+either, not that detection needs another chance. Only a project whose
+own import actually failed ever sees this dialog; a batch import's
+other, successful projects are untouched.
+
+Structural note: `NoVendorMatchError` specifically (not
+`AmbiguousVendorMatchError`) can only happen when the file has no
+recognizable projection data at all -- `generic_hdf5`/`generic_tiff`
+(the low-specificity fallbacks) match *any* hdf5 file with a 3D
+dataset or *any* tiff folder with at least one file, so anything with
+real data always matches at least one of them. That means picking a
+different plugin can only ever rescue an `AmbiguousVendorMatchError`,
+never a true `NoVendorMatchError` -- confirmed directly (`gui_samples/broken_no_plugin.h5`,
+picking `generic_hdf5` for it fails with `ProjectImportError` instead,
+re-offering the picker as designed).
+
 ## Project panel
 
 `ProjectPanel` is a `QTreeWidget`, not a custom `QAbstractItemModel`.
@@ -134,14 +175,37 @@ Three independent things a row can be:
   project's projections into the viewer and points the adjustment
   panel at it. Independent of checked/selected.
 
-No status color (red/gray/green) yet. Planned mapping, for when it's
-built:
+### Status color
 
-| Color | Condition |
-|---|---|
-| red | `project.needs_user_input()` |
-| gray | resolved, not yet reconstructed |
-| green | `run.volume` is not `None` |
+Each row's `Status` child (first of the five `INFO_FIELDS`) and the
+project name itself are colored by `_status_of(session)` /
+`_STATUS_COLORS`, four states rather than the original three-state
+plan (red/gray/green) -- a hard import failure needed its own color,
+reusing "needs_input"'s would have conflated "fixable by filling in a
+field" with "not fixable from this panel at all":
+
+| State | Color | Condition |
+|---|---|---|
+| importing | blue | `session.run is None`, `session.error is None` -- in flight |
+| error | red | `session.run is None`, `session.error` set -- import itself failed (`NoVendorMatchError`, etc.), nothing here to fill in. Transient: only visible while the plugin picker is offered (see "Plugin picker" above); canceling removes the row instead of leaving it red |
+| needs_input | orange | `project.needs_user_input()` |
+| ready | gray | resolved, not yet reconstructed |
+| reconstructed | green | `run.volume is not None`, or `session.exported` |
+
+`session.exported`: `run_batch()` (used by `MainWindow._reconstruct_selected()`,
+the "Reconstruct selected" batch action) builds its own internal
+`PipelineRun` per config and never hands back the volume, so
+`session.run.volume` -- what a single-project reconstruct in
+`AdjustmentPanel` populates -- stays `None` even on a successful batch
+export. `_reconstruct_selected()`'s `done()` sets `exported = True` on
+each session `run_batch()` reported successful, the equivalent signal
+for that path.
+
+`MainWindow._open_project()` on a project stuck in "error" reports
+"failed to import: ..." rather than "is still importing" --
+`session.run` stays `None` in both cases (`_import_session()`'s
+`failed()` never sets it), so they need `session.error` to tell them
+apart.
 
 ## Adjustment panel
 
@@ -170,9 +234,35 @@ first time `_refresh_from_session()` knows this project's row count,
 the same pattern `center` uses for `width / 2.0` -- an arbitrary `0`
 is not a useful default for either.
 
-Completion's "ask" fields (currently just `geometry_type`) live here,
-not in a separate dialog: changing the combo box writes directly into
-`session.config.completion_answers`.
+Completion's "ask" fields live here, not in a separate dialog:
+`geometry_type` and, now, `angle_span` both write directly into
+`session.config.completion_answers` when changed. `angle_span` is one
+field, not a start/end angle pair -- `completion/derivers.py`'s
+`derive_angles()` always builds `angles` as `np.linspace(0, angle_span,
+n, endpoint=False)`, so only the span (end - start) is ever consumed;
+an absolute start angle would have no effect on the derived array,
+which is why the UI doesn't offer one. Defaults to `180.0` (the common
+half-turn-scan case) until a resolved value is known
+(`DataInterface.get_metadata("angle_span")`) or the user has already
+typed one (`completion_answers["angle_span"]`, checked first). Confirmed
+directly: `gui_samples/needs_geometry.h5` (matched by the `generic_hdf5`
+fallback, which provides neither `angles` nor `angle_span`) goes from
+`missing_soft_fields() == ['geometry_type', 'angles', 'angle_span']` to
+fully resolved once both `geometry_type` and `angle_span` are supplied
+through Basic settings -- `angles` derives from the user-supplied span.
+
+`angle_span_spin` is disabled (with an explanatory tooltip) whenever
+its value comes from `DataInterface.get_metadata("angle_span")` rather
+than from the user -- i.e. the file's own recorded angles already give
+an exact answer, editing it here would do nothing until a re-import
+anyway. A value like `179.55` in that state is not a rounding bug: it's
+`derive_angle_span()`'s `max(angles) - min(angles)`, and a scan whose
+angles were generated `np.linspace(0, 180, n, endpoint=False)` (never
+re-measuring the start angle as the end angle) is exactly `180 -
+180/n` degrees short of `180`. `max - min` is deliberately the
+derivation used rather than assuming `endpoint=False` and adding the
+step back in -- a real scan that does record the redundant endpoint
+would then be overcounted by one step instead.
 
 ### Automatic adjustments
 
@@ -320,9 +410,8 @@ avoid.
 
 ## What isn't built yet
 
-- Project panel status color. The checkbox now has one consumer
-  (Reconstruct selected); copy-settings-between-projects would be a
-  second.
+- Copy-settings-between-projects, the checkbox's second consumer
+  (alongside Reconstruct selected).
 - Streaming a reconstruction to disk slice by slice, so a volume
   larger than available RAM can still be reconstructed. Currently
   refused outright by the RAM check above rather than attempted.
@@ -333,6 +422,22 @@ avoid.
 - Refinements tab (ring/zinger removal).
 - Import-from-config (loading a batch `.ini` directly into the project
   panel, rather than one project's `.ini` via Basic settings).
-- `NoVendorMatchError`/`AmbiguousVendorMatchError` has no dedicated UI;
-  it currently just lands in `session.error` the same as a missing
-  completion field.
+- Basic settings has a UI for two completion "ask" fields
+  (`geometry_type`, `angle_span`), not every one `core/known_fields.py`
+  defines. `source_to_detector_distance`/`source_to_object_distance`
+  (mandatory_soft, `ask`-only, conditional on `geometry_type == "cone"`)
+  have no UI at all -- selecting "cone" in Basic settings' geometry
+  combo makes both newly required with no way to answer them from this
+  panel, the same permanently-`needs_input` situation `angle_span` was
+  in before this was built. `voxel_size` doesn't need one (`default`
+  strategy, auto-resolves); `sample_name`/`operator` are `optional`,
+  never blocking.
+- No cross-session guard on background operations: if the open project
+  changes while a reconstruct/find-COR/find-tilt worker for the
+  previous one is still in flight, its `done()` callback still updates
+  the viewer/Basic settings unconditionally when it lands, showing
+  another project's result. Known, not yet fixed.
+- `ProjectObject.close()` (releases a disk-mode project's open
+  `h5py.File`) is never called -- not on app exit, not when a
+  session's `run` is replaced (`_load_config_file()`). No "close/remove
+  a project" action exists yet for this to hook into.
