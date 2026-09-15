@@ -18,6 +18,11 @@ flat/dark it also produces) recovers the ideal transmission:
 projection, flat, and dark frame. Ring artifacts fall out of this
 fixed-pattern `gain` map being imperfectly corrected in every
 projection angle; there is no separate ring-artifact simulation step.
+
+`attenuation_scale` has no inherent physical scale of its own --
+line_integral is a raw pixel-count sum, so what counts as a realistic
+value depends on the object. attenuation_scale_for_min_transmission()
+solves for it from the actual data instead of guessing.
 """
 from __future__ import annotations
 
@@ -37,6 +42,34 @@ def project_parallel(volume: np.ndarray, angles_deg: np.ndarray) -> np.ndarray:
         rotated = ndi.rotate(volume, -angle, axes=(1, 2), reshape=False, order=1, mode="constant", cval=0.0)
         projections[i] = rotated.sum(axis=1)
     return projections
+
+
+def attenuation_scale_for_min_transmission(line_integrals: np.ndarray, target_min_transmission: float = 0.14) -> float:
+    """
+    Solve for the attenuation_scale (Beer-Lambert: transmission =
+    exp(-line_integral * attenuation_scale)) that makes the single
+    most-attenuating simulated ray's transmission equal
+    target_min_transmission, the way a real CT acquisition's
+    exposure/filtration is actually set up: tuned so even the densest
+    path through the sample still transmits a usable fraction of the
+    beam (real practice: at least ~10-15%), not so little the signal
+    there is noise-dominated.
+
+    A fixed attenuation_scale has no such physical grounding, and
+    scaling it only by array width (an earlier version of this
+    function did) prevents transmission underflowing to exact zero in
+    float32 but does not make it realistic -- it can still land at a
+    small fraction of a percent. This solves for the actual worst-case
+    ray in `line_integrals` instead of guessing from shape alone, so it
+    adapts to whatever object/geometry produced them.
+
+    Returns 1.0 (arbitrary; there is nothing to calibrate against) if
+    `line_integrals` is all zero, e.g. an empty phantom.
+    """
+    max_line_integral = float(np.max(line_integrals))
+    if max_line_integral <= 0.0:
+        return 1.0
+    return -np.log(target_min_transmission) / max_line_integral
 
 
 def apply_cor_and_tilt(projections: np.ndarray, cor_deviation: float, tilt_deg: float) -> np.ndarray:

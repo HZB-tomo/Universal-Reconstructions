@@ -138,7 +138,9 @@ def test_forward_model_is_consistent_with_normalize(tmp_path):
     should recover the ideal transmission almost exactly, since the
     forward model is built as normalize()'s exact inverse.
     """
-    phantom = _small(noise_level=0.0, n_scratches=0, n_defective_pixels=0)
+    # attenuation_scale pinned explicitly: this test's assertion depends
+    # on the exact value, unlike generate()'s auto-scaled default.
+    phantom = _small(noise_level=0.0, n_scratches=0, n_defective_pixels=0, attenuation_scale=2.0)
     path = tmp_path / "phantom.h5"
     write_hdf5(phantom, path)
 

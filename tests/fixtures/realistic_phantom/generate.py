@@ -12,6 +12,7 @@ import numpy as np
 from tests.fixtures.realistic_phantom.phantom import make_phantom_volume
 from tests.fixtures.realistic_phantom.simulate import (
     apply_cor_and_tilt,
+    attenuation_scale_for_min_transmission,
     make_detector_patterns,
     project_parallel,
     synthesize_raw,
@@ -44,7 +45,8 @@ def generate(
     n_darks: int = 10,
     cor_deviation: float = 0.0,
     tilt_deg: float = 0.0,
-    attenuation_scale: float = 2.0,
+    attenuation_scale: float | None = None,
+    target_min_transmission: float = 0.14,
     flat_intensity: float = 1.0,
     dark_level: float = 0.01,
     inhomogeneity_strength: float = 0.05,
@@ -63,15 +65,29 @@ def generate(
 
     See doc/REALISTIC_PHANTOM.md for what each parameter controls, and
     simulate.py's module docstring for the forward model.
+
+    `attenuation_scale`, if given explicitly, is a total optical depth
+    per unit of the ellipse table's density scale -- an arbitrary,
+    ungrounded number; nothing about the ellipse table's values ties it
+    to a realistic exposure. None (the default) instead solves for it
+    via attenuation_scale_for_min_transmission(), so the single
+    most-attenuating ray ends up at `target_min_transmission` of the
+    free beam, the way a real acquisition's exposure/filtration is
+    actually set up (real practice: at least ~10-15%, hence the default
+    0.14). Passing attenuation_scale explicitly bypasses this, at
+    whatever exposure that value happens to produce for this object.
     """
     rng = np.random.default_rng(seed)
+    height, width = shape[0], shape[1]
 
     volume = make_phantom_volume(shape)
     angles = np.linspace(0, 180, n_angles, endpoint=False)
     line_integrals = project_parallel(volume, angles)
     line_integrals = apply_cor_and_tilt(line_integrals, cor_deviation, tilt_deg)
 
-    height, width = shape[0], shape[1]
+    if attenuation_scale is None:
+        attenuation_scale = attenuation_scale_for_min_transmission(line_integrals, target_min_transmission)
+
     gain, dark_offset = make_detector_patterns(
         (height, width), inhomogeneity_strength, n_scratches, scratch_strength, n_defective_pixels, dark_level, rng
     )

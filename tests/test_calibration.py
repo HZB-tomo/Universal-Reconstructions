@@ -246,6 +246,12 @@ def test_find_tilt_center_recovers_a_disproportionate_offset_the_default_range_w
         cor_deviation=true_cor, tilt_deg=true_tilt_deg,
         n_scratches=0, n_defective_pixels=0, inhomogeneity_strength=0.0,
         noise_level=0.0, seed=13,
+        # Pinned explicitly: this test's numeric thresholds below were
+        # validated at this exposure, not generate()'s auto-calibrated
+        # default (which targets a realistic minimum transmission, see
+        # doc/REALISTIC_PHANTOM.md, and is unrelated to what this test
+        # is actually checking).
+        attenuation_scale=2.0 * 64 / 96,
     )
     project = to_project_object(phantom)
     reference = build_reference(project)
