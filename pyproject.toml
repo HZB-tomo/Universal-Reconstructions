@@ -23,9 +23,13 @@ dev = ["pytest"]
 # ImportError telling you to install this extra rather than failing to
 # import the whole package.
 preprocessing = ["algotom"]
+# Only needed to run the desktop GUI (`tomo-gui` / `python -m gui`).
+# See doc/GUI_ARCHITECTURE.md.
+gui = ["PySide6", "pyqtgraph", "psutil"]
 
 [project.scripts]
 tomo = "orchestration.cli:main"
+tomo-gui = "gui.main:main"
 
 [tool.setuptools]
 packages = [
@@ -34,4 +38,5 @@ packages = [
     "calibration", "calibration.backends",
     "reconstruction", "reconstruction.backends",
     "orchestration",
+    "gui",
 ]
