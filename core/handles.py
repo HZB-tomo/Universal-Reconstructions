@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -77,24 +78,50 @@ class Hdf5DiskHandle(DataHandle):
     a reference to that open file alive for as long as any
     Hdf5DiskHandle from it exists (see ProjectObject._open_resource in
     project.py).
+
+    `index_range`, when given, restricts this handle to that leading-
+    axis slice of `dataset` -- e.g. a vendor whose flats are frames
+    0-19 of the same dataset the projections come from (see
+    data_import/vendors/bamline.py) points both PathMap roles at one
+    dataset and gives each its own index_range. Handle-local index 0
+    then means `dataset[index_range.start]`, not `dataset[0]`. Only a
+    step of 1 (or None) is supported -- the one shape this is ever
+    needed for is a contiguous frame range, not a strided one.
     """
 
-    def __init__(self, dataset):
+    def __init__(self, dataset, index_range: Optional[slice] = None):
         self._dataset = dataset
+        if index_range is not None and index_range.step not in (None, 1):
+            raise ValueError(f"Hdf5DiskHandle only supports a step of 1, got {index_range.step!r}")
+        self._start, self._stop, _ = (
+            (0, dataset.shape[0], 1) if index_range is None else index_range.indices(dataset.shape[0])
+        )
+
+    def _translate(self, leading):
+        if isinstance(leading, slice):
+            offset_start, offset_stop, offset_step = leading.indices(self._stop - self._start)
+            return slice(self._start + offset_start, self._start + offset_stop, offset_step)
+        if leading is None:
+            return slice(self._start, self._stop)
+        return self._start + leading
 
     def get(self, index=None) -> np.ndarray:
-        return self._dataset[()] if index is None else self._dataset[index]
+        if index is None:
+            return self._dataset[self._start:self._stop]
+        leading, rest = (index[0], index[1:]) if isinstance(index, tuple) else (index, ())
+        translated = self._translate(leading)
+        return self._dataset[(translated, *rest)] if rest else self._dataset[translated]
 
     @property
     def shape(self) -> tuple:
-        return self._dataset.shape
+        return (self._stop - self._start, *self._dataset.shape[1:])
 
     @property
     def storage_mode(self) -> str:
         return "disk"
 
     def materialize(self) -> RamHandle:
-        return RamHandle(self._dataset[()])
+        return RamHandle(self._dataset[self._start:self._stop])
 
 
 class TiffDiskHandle(DataHandle):

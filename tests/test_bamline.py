@@ -81,6 +81,11 @@ def test_full_import_resolves_with_no_missing_soft_fields(tmp_path):
 
     assert run.project.missing_soft_fields() == []
     assert run.project.metadata.get("geometry_type") == "parallel"
+    # CT_Pixelsize/DMM_Energy are per-frame NDAttributes in real BAMline
+    # files (see generate_bamline.py), not scalars -- voxel_size must
+    # come out as one number, not the whole per-frame array.
+    assert np.ndim(run.project.metadata.get("voxel_size")) == 0
+    assert run.project.metadata.get("voxel_size") == pytest.approx(0.65)
 
     di = DataInterface(run.project)
     n_proj, height, width = di.shape_of("projections")

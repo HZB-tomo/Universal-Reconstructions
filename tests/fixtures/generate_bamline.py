@@ -81,6 +81,9 @@ def generate(
         f.create_dataset("/entry/data/data", data=all_frames)
         f.create_dataset("/entry/instrument/NDAttributes/RingCurrent", data=np.full(n_total, 300.0))
         f.create_dataset("/entry/instrument/NDAttributes/Binning_X", data=np.full(n_total, 1))
+        # Per-frame NDAttributes in real files, not scalars -- constant
+        # across the scan, same as a real one would be, to catch a
+        # plugin that reads the whole array where a scalar is wanted.
         f.create_dataset("/entry/instrument/NDAttributes/CT_Pixelsize", data=np.full(n_total, 0.65))
         f.create_dataset("/entry/instrument/NDAttributes/DMM_Energy", data=np.full(n_total, 30000.0))
         f.create_dataset(angle_attribute, data=full_angles)

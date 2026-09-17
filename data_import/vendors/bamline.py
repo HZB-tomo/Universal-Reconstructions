@@ -184,14 +184,19 @@ class BamlineHdf5Plugin(ImportPlugin):
         bundle.set("angles", full_angles[proj_start:proj_end + 1], tier="mandatory_soft", source="file")
         bundle.set("geometry_type", "parallel", tier="mandatory_soft", source="file")
 
+        # CT_Pixelsize/DMM_Energy/DCM_Energy are per-frame NDAttributes
+        # (one value logged every frame, same as the angle channels),
+        # not scalars -- constant for the whole scan in practice, so
+        # the first value (at proj_start, i.e. from a real projection
+        # frame, not a stale plateau one) is what these fields want.
         if _PIXEL_SIZE in handle:
-            bundle.set("voxel_size", handle[_PIXEL_SIZE][()], tier="mandatory_soft", source="file")
+            bundle.set("voxel_size", float(handle[_PIXEL_SIZE][proj_start]), tier="mandatory_soft", source="file")
         else:
             bundle.declare_missing("voxel_size", tier="mandatory_soft")
 
         energy_path = next((p for p in _ENERGY_PATHS if p in handle), None)
         if energy_path is not None:
-            bundle.set("energy", handle[energy_path][()], tier="optional", source="file")
+            bundle.set("energy", float(handle[energy_path][proj_start]), tier="optional", source="file")
 
         bundle.declare_missing("center_of_rotation", tier="computed")
         bundle.declare_missing("tilt_angle", tier="computed")
