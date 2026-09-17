@@ -155,6 +155,40 @@ Use `TiffSignature` instead of `Hdf5Signature`; see
 complete example (filename patterns, sidecar JSON requirements, reading
 a metadata sidecar file in `parse_metadata()`).
 
+## When flats/darks share a dataset with projections
+
+Not every vendor gives projections, flats, and darks their own
+separate dataset. `PathMap` has `projections_range`/`flats_range`/
+`darks_range` (each `Optional[slice]`, default `None` meaning "the
+whole dataset", so every plugin that doesn't need this is unaffected)
+for exactly this: point two roles at the *same* path, and give each its
+own slice of it. `Hdf5Backend`/`TiffBackend` apply the slice before
+wrapping the result in a `DataHandle`, so nothing downstream needs to
+know this happened -- `DataInterface.get_projections()` etc. see a
+clean, zero-based array either way.
+
+`vendors/bamline.py` is the real example: BAMline's on-the-fly scans
+write one dataset covering the whole acquisition (a stationary
+flat-field plateau, the real rotation, then another stationary
+stretch), not separate flats/projections files. `get_path_map()` works
+out where the plateau ends and where a clean ~180 deg window begins
+from the angle data itself (no fixed frame count), then returns both
+roles pointing at the one path with different ranges. Only a slice
+`step` of 1 is supported (`core/handles.py`'s `Hdf5DiskHandle`) -- the
+one shape this exists for is a contiguous frame range, not a strided
+one.
+
+## When the file carries no vendor-identifying attribute at all
+
+Not every vendor writes something as convenient as `beamline ==
+"my_vendor"`. `vendors/bamline.py`'s files have no such marker at all;
+its `Hdf5Signature` instead combines a few always-present,
+vendor-distinctive paths with a `custom_predicate` that checks a
+structural property (at least one of several candidate rotation-stage
+attributes actually shows real angular movement, not encoder noise on
+a stage that never turned) -- still deterministic, still countable
+toward specificity, just not a single fixed path or attribute value.
+
 ## Reference examples in the codebase
 
 | File | What it demonstrates |
@@ -162,4 +196,5 @@ a metadata sidecar file in `parse_metadata()`).
 | `vendors/synthetic.py` | Simplest case, both hdf5 and tiff, fixed known paths |
 | `vendors/hypothetical_synchrotron.py` | A vendor with flats and voxel size read from the file |
 | `vendors/generic_parallel_synchrotron.py` | A vendor with flats and darks, and a field (`geometry_type`) known unconditionally from the vendor's convention; paired with [`REALISTIC_PHANTOM.md`](./REALISTIC_PHANTOM.md)'s test-data generator |
+| `vendors/bamline.py` | Flats and projections sharing one dataset via `PathMap` ranges; picking the right one of several candidate metadata paths by data content, not by name; no vendor-identifying attribute at all, so the signature leans on structure instead; no darks in the file at all (a fixed per-detector `dark_offset` constant instead, see `preprocessing/normalization.py`) |
 | `vendors/generic.py` | Low-specificity fallback plugins |

@@ -120,15 +120,15 @@ class DataImporter:
         data_handles = {}
         if path_map.projections:
             data_handles["projections"] = backend.build_data_handle(
-                opened, path_map.projections, storage_mode
+                opened, path_map.projections, storage_mode, path_map.projections_range
             )
         if path_map.flats:
             data_handles["flats"] = backend.build_data_handle(
-                opened, path_map.flats, storage_mode
+                opened, path_map.flats, storage_mode, path_map.flats_range
             )
         if path_map.darks:
             data_handles["darks"] = backend.build_data_handle(
-                opened, path_map.darks, storage_mode
+                opened, path_map.darks, storage_mode, path_map.darks_range
             )
 
         project = ProjectObject(

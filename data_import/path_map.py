@@ -31,3 +31,13 @@ class PathMap:
     metadata_source: Optional[str] = None
     # Vendor-specific extras that do not fit the fields above.
     extra: dict = field(default_factory=dict)
+
+    # Optional leading-axis slice applied when building the data handle
+    # for the matching path above, e.g. flats_range=slice(0, 20) when
+    # flats are frames 0-19 of the *same* dataset `flats` points at,
+    # rather than their own separate dataset (see vendors/bamline.py).
+    # None (the default, for every plugin that doesn't need this) means
+    # the whole dataset, unchanged from before this field existed.
+    projections_range: Optional[slice] = None
+    flats_range: Optional[slice] = None
+    darks_range: Optional[slice] = None
