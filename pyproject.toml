@@ -4,9 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tomo_project"
-version = "0.0.1"
-description = "Tomographic data analysis - import pipeline skeleton"
+version = "0.1.0"
+description = "URCT: a modular tomographic reconstruction pipeline -- pluggable vendor import, pluggable reconstruction backends, a desktop GUI, a CLI, and a scripting API over one shared orchestration core."
+readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Shahabeddin Dayani" },
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+]
 dependencies = [
     "numpy",
     "scipy",
@@ -17,12 +29,20 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 # Only needed for preprocessing.remove_zinger()/remove_ring_artifacts()/
-# process_volume(), the "algotom_fbp" reconstruction backend, and the
-# "algotom_cor" calibration backend. `pip install .[preprocessing]` to
-# get it; without it, those specific functions/backends raise a clear
-# ImportError telling you to install this extra rather than failing to
-# import the whole package.
+# process_volume(), the algotom-based reconstruction backends
+# (algotom_fbp/gridrec/bpf/dfi/bp/sirt/sart/art/cgls -- see
+# reconstruction/backends/), and the "algotom_cor" calibration backend.
+# `pip install .[preprocessing]` to get it; without it, those specific
+# functions/backends raise a clear ImportError telling you to install
+# this extra rather than failing to import the whole package.
 preprocessing = ["algotom"]
+# A FURTHER, separate optional dependency, needed only by
+# algotom_bp/sirt/sart/art/cgls (algotom's own astra_reconstruction()
+# wrapper) -- not covered by `preprocessing` above. algotom_gridrec
+# needs a third thing, tomopy, which has no pip wheel at all and must
+# be installed separately via conda (`conda install -c conda-forge
+# tomopy`); not listed here for that reason.
+reconstruction_extra = ["astra-toolbox"]
 # Only needed to run the desktop GUI (`tomo-gui` / `python -m gui`).
 # See doc/GUI_ARCHITECTURE.md.
 gui = ["PySide6", "pyqtgraph", "psutil"]

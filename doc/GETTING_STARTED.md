@@ -35,6 +35,27 @@ pip install ipykernel
 python -m ipykernel install --user --name=tomo_project --display-name="Python (tomo_project)"
 ```
 
+### Desktop GUI
+
+```bash
+pip install -e .[gui]
+tomo-gui
+```
+
+On Linux, PySide6/Qt6 needs a few system libraries not always present
+on a minimal install (Ubuntu/Debian):
+
+```bash
+sudo apt install libxcb-cursor0 libxkbcommon0 libegl1 libgl1 \
+    libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+    libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xfixes0
+```
+
+On a machine with no display (a headless server), the GUI itself still
+needs a display to render to: either run it under a virtual one
+(`xvfb-run tomo-gui`), or set `QT_QPA_PLATFORM=offscreen` for
+non-interactive use (e.g. running the GUI's own test suite).
+
 ## 3. Run the test suite
 
 ```bash

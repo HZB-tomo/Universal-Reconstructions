@@ -45,12 +45,12 @@ derive-then-ask.
 
 | Field | Category | Tier | Strategy | Default | Unit | Notes |
 |---|---|---|---|---|---|---|
-| `angles` | Geometry / scan | `mandatory_soft` | Derive (from `angle_span` + projection count + `rotation_direction`) → else Ask | — | degrees | Projection count is read off the array shape, never stored separately. Was `mandatory_hard` in the vendor plugins; now `mandatory_soft` in [synthetic.py](../data_import/vendors/synthetic.py) and [hypothetical_synchrotron.py](../data_import/vendors/hypothetical_synchrotron.py) since completion can recover it. |
+| `angles` | Geometry / scan | `mandatory_soft` | Derive (from `angle_span` + projection count + `rotation_direction`) → else Ask | — | degrees | Projection count is read off the array shape, never stored separately. |
 | `geometry_type` | Geometry / scan | `mandatory_soft` | Ask | — | categorical: `parallel` / `cone` | No safe default — a wrong guess silently corrupts every downstream calculation. Gates whether the cone-beam-only rows below apply. |
-| `angle_span` | Geometry / scan | `mandatory_soft` | Derive (max − min of `angles`, if present) → else Ask | — | degrees | Covers the "180 / 360 / limited angle" distinction as a plain number rather than a second categorical field that would need to stay in sync with it. |
+| `angle_span` | Geometry / scan | `mandatory_soft` | Derive (max − min of `angles`, if present) → else Ask | — | degrees | |
 | `rotation_direction` | Geometry / scan | `optional` | Default | `ccw` | categorical: `cw` / `ccw` | Wrong default only flips orientation, never invalidates the reconstruction. |
 | `voxel_size` | Pixel / detector | `mandatory_soft` | Default | `1` | µm | |
-| `detector_pixel_size` | Pixel / detector | `mandatory_soft` | Derive (from `voxel_size`) → else Default | `1` | µm | Only meaningfully distinct from `voxel_size` in cone-beam (magnification); `voxel_size` always resolves first (defaults to `1` itself), so in practice this derives every time rather than reaching its own static default. |
+| `detector_pixel_size` | Pixel / detector | `mandatory_soft` | Derive (from `voxel_size`) → else Default | `1` | µm | Distinct from `voxel_size` only in cone-beam (magnification). `voxel_size` always resolves first, so this derives from it in practice. |
 | `source_to_detector_distance` | Cone-beam geometry | `mandatory_soft`, conditional on `geometry_type == "cone"` | Ask | — | mm | Unused for parallel-beam projects. |
 | `source_to_object_distance` | Cone-beam geometry | `mandatory_soft`, conditional on `geometry_type == "cone"` | Ask | — | mm | Unused for parallel-beam projects. |
 | `center_of_rotation` | Alignment | `computed` | Calculate (tool proposes) + user confirms | `0` | pixels (deviation from image center, sub-pixel float) | Never blocks import or reconstruction; reconstruction proceeds on the current value whether or not it's been confirmed. |

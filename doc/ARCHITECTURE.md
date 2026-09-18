@@ -37,10 +37,9 @@ are the pipeline stages after import; see
 not take a `ProjectObject`; see their sections below.
 
 `orchestration/` is the only package allowed to depend on all the
-others -- it is what actually chains import through export into one
-run. None of the packages above depend on it back, so each stays
-independently testable and usable stage-by-stage without pulling in
-the orchestrator at all, exactly as `USING_THE_PIPELINE.md` describes.
+others -- it chains import through export into one run. None of the
+packages above depend on it back; each is usable stage-by-stage
+without it, as `USING_THE_PIPELINE.md` describes.
 
 ## `core/` in detail
 

@@ -69,11 +69,9 @@ $ tomo validate broken.ini
 does_not_exist: ["unexpected error: [Errno 2] ... No such file or directory ..."]
 ```
 
-Exits `0` if nothing was found, `1` if any project had a problem.
-Running this before `tomo run`/`tomo batch` is how you find out about a
-missing field or a bad path before committing to the real (slower) run
--- see `ORCHESTRATION.md`'s "Batch runs" section for why this check
-exists and what it does and doesn't guarantee.
+Exits `0` if nothing was found, `1` if any project had a problem. See
+`ORCHESTRATION.md`'s "Batch runs" section for what this check does and
+doesn't guarantee.
 
 ## `tomo run`
 
@@ -149,20 +147,14 @@ re-running).
 Meant for scripting -- checkable with `$?` (or `%errorlevel%` on
 Windows) without parsing `tomo`'s printed output.
 
-## Why `run`/`batch` don't crash with a traceback
+## Error output
 
-`PipelineRun.run_all()` and `run_batch()` are deliberately narrow about
-what they catch: `run_all()` only catches its own `PipelineStageError`,
-and `run_batch()`'s broader catch exists specifically so one project's
-unanticipated failure can't take down the rest of a batch. Used as a
-library (a notebook, a future GUI), a genuine bug is meant to surface
-normally, not be silently swallowed.
-
-A CLI user doesn't want a raw Python traceback for something as
-mundane as a typo'd path, though -- so `tomo run` and `tomo batch` each
-add their own broad exception catch around the call, purely as a
-presentation choice at the CLI layer. `PipelineRun`/`run_batch`
-themselves are unchanged; see `orchestration/cli.py`'s `_cmd_run()`.
+`tomo run` and `tomo batch` catch any exception around their call to
+`PipelineRun.run_all()`/`run_batch()` and print `FAILED: <reason>`
+instead of a Python traceback. `PipelineRun.run_all()` itself only
+catches its own `PipelineStageError`; `run_batch()` catches anything,
+per project, so one project's failure never stops the rest. See
+`orchestration/cli.py`'s `_cmd_run()`.
 
 ## See also
 

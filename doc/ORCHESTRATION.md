@@ -32,7 +32,7 @@ result = PipelineRun(config).run_all()
 | `completion_answers` | Values for fields `completion.run()`'s automatic pass can't resolve (e.g. `geometry_type`, `sample_name`) -- fed through `completion.provide()`. |
 | `rows`, `reference_reducer`, `dark_offset`, `zinger_removal`, `zinger_threshold`, `zinger_size`, `ring_correction`, `ring_method` | Preprocessing. `rows=None` means every row. |
 | `calibration_backend`, `center`, `tilt_deg`, `tilt_num_rows`, `tilt_margin`, `tilt_outlier_tolerance` | `center`/`tilt_deg=None` means auto-find (`find_center()`/`find_tilt()`); a value skips finding entirely. |
-| `reconstruction_backend`, `device`, `reconstruction_options` | Reconstruction. `geometry_type` and the cone-beam/pixel-size fields are **not** here -- they come from `project.metadata`, already resolved by completion; see "Why geometry isn't a config field" below. |
+| `reconstruction_backend`, `device`, `reconstruction_options` | Reconstruction. `geometry_type` and the cone-beam/pixel-size fields are **not** here -- they come from `project.metadata`, already resolved by completion; see "Geometry fields" below. |
 | `crop`, `dtype`, `dtype_clip_min`, `dtype_clip_max` | Postprocessing. `dtype="uint16"` runs `reconstruction.to_uint16()`. |
 | `export_format`, `export_path`, `export_dataset_path`, `export_extra_settings` | Export. `export_path` may be a template; see "Export path templates" below. |
 | `stream`, `stream_chunk_rows` | `stream=True` reconstructs and writes one chunk of rows at a time instead of the whole volume, so a project too large for RAM as a single reconstruction can still be run -- needs `center`/`tilt_deg` (and, for `dtype="uint16"`, the clip fields above) already resolved. `stream_chunk_rows=None` sizes chunks automatically. See doc/RECONSTRUCTION.md's "Streaming" section. |
@@ -45,17 +45,14 @@ since they're inherently open-ended (a future backend's kwargs can't be
 enumerated in advance) rather than something a template can meaningfully
 pre-fill.
 
-### Why geometry isn't a config field
+### Geometry fields
 
 `geometry_type`, `source_to_detector_distance`, `source_to_object_distance`,
-and `detector_pixel_size` are already `core/known_fields.py` entries,
-resolved onto `project.metadata` by the completion stage (from the file
-itself, or from `completion_answers`) before `reconstruct()` runs.
-Duplicating them as separate `ProjectConfig` fields would let a
-project's answer disagree with itself -- one value satisfying
-completion, a different one actually reaching `Geometry`. `reconstruct()`
-reads them from `project.metadata`, the same place `angles` already
-comes from.
+and `detector_pixel_size` are not `ProjectConfig` fields. They are
+`core/known_fields.py` entries, resolved onto `project.metadata` by the
+completion stage (from the file itself, or from `completion_answers`)
+before `reconstruct()` runs, and read from there -- the same place
+`angles` comes from.
 
 ## `PipelineRun`
 
@@ -211,24 +208,17 @@ config/data problem -- without reconstructing or exporting
 reconstruction problem surfaces immediately on whichever project runs
 first anyway).
 
-Validation is **advisory only**: `run_batch()` runs every config
-through `run_all()` regardless of what `validate_config()` found.
-There's no "skip because validation flagged this" path -- a project
-that would have failed validation just fails again, quickly, at the
-same stage, and the same mechanism (a failed `PipelineResult`) reports
-both cases identically. This keeps a batch run from silently excluding
-a project based on a validation check that might not perfectly predict
-what the real run does.
+Validation is advisory only: `run_batch()` runs every config through
+`run_all()` regardless of what `validate_config()` found. A project
+that would have failed validation just fails again, at the same stage,
+reported the same way (a failed `PipelineResult`).
 
-Every project gets an independent attempt: one project's failure
-never stops the rest, whether it's a `PipelineStageError` (`run_all()`
-catches this itself) or something entirely unanticipated -- a
-corrupted file, a library bug, an out-of-memory error (`run_batch()`
-wraps each project's `run_all()` call in a broad exception catch for
-exactly this). `PipelineRun.run_all()` called directly, outside
-`run_batch()`, does not have this broad catch -- a genuine bug should
-surface normally in single/interactive use rather than being silently
-swallowed.
+Every project gets an independent attempt: one project's failure never
+stops the rest, whether it's a `PipelineStageError` (`run_all()`
+catches this itself) or anything else (`run_batch()` wraps each
+project's `run_all()` call in a broad exception catch). `PipelineRun.run_all()`
+called directly, outside `run_batch()`, does not have this broad
+catch.
 
 `PipelineResult.config` is the config that produced it, so re-running
 only what failed after fixing a config is direct:
@@ -238,12 +228,7 @@ fixed = [dataclasses.replace(r.config, completion_answers={"geometry_type": "par
 run_batch(fixed)
 ```
 
-Batch runs are always sequential, deliberately: `algotom_fbp`'s own
-reconstruction is already the bottleneck at real scale (typically
-1000-2000 slices per project), so batch-level parallelism would
-contend for the same resources reconstruction is already saturating,
-without the wall-clock benefit that contention-free parallelism would
-otherwise give.
+Batch runs are always sequential.
 
 ## Command line
 

@@ -1,22 +1,10 @@
 # GUI architecture
 
-The desktop GUI for `tomo_project`, in `gui/`. Built on PySide6 (Qt6,
-LGPL) and pyqtgraph for image display. Desktop only, no web interface.
+The desktop GUI for `tomo_project`, in `gui/`. Built on PySide6 and
+pyqtgraph. Desktop only, no web interface.
 
-`gui/` depends on `orchestration/` (and, through it, everything else);
-nothing outside `gui/` depends back on it.
-
-## Why PySide6 and pyqtgraph
-
-PySide6 over PyQt5/PyQt6: LGPL, no dual-licensing question to track.
-Qt6 instead of legacy Qt5.
-
-pyqtgraph over matplotlib for image display: a slice/frame slider,
-histogram/levels (contrast) widget, and draggable ROIs (line, box,
-rotatable) come built in, which is what browsing projection stacks,
-adjusting contrast, and reading a gray value or an angle off the image
-needs. matplotlib redraws the whole canvas per update and has none of
-this.
+`gui/` depends on `orchestration/` (and, through it, every other
+package). Nothing outside `gui/` depends on it.
 
 ## Files
 
@@ -34,574 +22,331 @@ gui/
 
 ## Window layout
 
-`MainWindow` is a `QMainWindow`. Three `QDockWidget`s (Projects, left;
-Adjustment, right), user-arrangeable; `ImageViewer` is the central
-widget. Menu bar (`File`, `Tools`) and status bar.
+`MainWindow` is a `QMainWindow`: two `QDockWidget`s (Projects, left;
+Adjustment, right), movable/floatable but not closable; `ImageViewer`
+is the central widget. Menu bar (`File`, `Tools`) and status bar.
 
-Dock layout is not persisted between launches yet; resets to the
-default each time. Persisting it is a `QMainWindow.saveState()`/
-`restoreState()` call away, not done.
+Dock layout is not persisted between launches; it resets to the
+default each time.
 
 ## ProjectSession
 
-One project as the GUI tracks it: a `ProjectConfig`, the `PipelineRun`
-driving it, and GUI-only state (`checked`, `preview_row`, `error`).
-`session.config` and `session.run.config` are the same object --
-editing a field in the adjustment panel mutates the `ProjectConfig`
-`PipelineRun` already holds, no separate sync step.
+One project as the GUI tracks it (`gui/session.py`):
 
-`ProjectConfig.resolved_project_id()` is just the path stem, so two
-files named the same in different folders collide. `session.py`'s
-`unique_project_id()` disambiguates against every id already in the
-project panel at import time; `MainWindow._import()` is the only
-caller.
+- `config`: a `ProjectConfig`.
+- `run`: the `PipelineRun` driving it (`None` until import starts).
+  `session.config` and `session.run.config` are the same object.
+- `checked`: membership in the next batch action.
+- `preview_row`: which row is shown/reconstructed in the viewer.
+  `None` until resolved to the middle row.
+- `error`: a `PipelineStageError` from a failed `complete()` or
+  `import_data()`, or `None`.
+- `export_rows`: `(from, to)`, both inclusive, or `None` for the full
+  range. GUI-only; translated into `config.rows` at export time.
+- `export_crop_yx`: `(y0, y1, x0, x1)`, half-open, or `None`.
+  GUI-only; translated into `config.crop` at export time.
+- `exported`: set once a batch export (`run_batch()`) succeeds for
+  this session.
 
-The GUI never wants `PipelineRun.calibrate()`'s implicit auto-find
-(`None` on either field) to run except when the user asks for it via
-Automatic adjustments' Find COR/Find tilt buttons. `tilt_deg` is set
-to `0.0` at project creation, a reasonable guess regardless of
-detector width. `center` starts as `None` -- a GUI-only sentinel,
-resolved to the image's midpoint (`width / 2.0`, i.e. "no offset") the
-first time `AdjustmentPanel._refresh_from_session()` knows this
-project's width, before which it never reaches a pipeline call. An
-absolute column like `0` would not be a sensible default; a real
-center of rotation sits within about 1-2% of the width from the
-midpoint, see below.
+`unique_project_id(stem, existing_ids)` disambiguates a new session's
+`project_id` against every id already in the project panel.
+
+`center`/`tilt_deg` on a fresh session's config are never left `None`:
+`tilt_deg` is set to `0.0` at creation, `center` resolves to the
+image's midpoint (`width / 2.0`) the first time
+`AdjustmentPanel._refresh_from_session()` knows this project's width.
 
 ## Threading
 
-Every pipeline call (import, calibrate, reconstruct, at any scope) runs
-on a `QThreadPool` worker via `workers.run_in_background()`, never on
-the GUI thread. `finished`/`failed` are Qt signals, delivered back on
-the GUI thread the normal way.
-
-The caller of `run_in_background()` must keep a reference to the
-returned `Worker` until it fires (`AdjustmentPanel._workers`,
-`MainWindow._workers`) -- nothing else keeps it alive.
+Every pipeline call (import, calibrate, reconstruct, at any scope)
+runs on a `QThreadPool` worker via `workers.run_in_background()`, never
+on the GUI thread. `finished`/`failed` are Qt signals, delivered back
+on the GUI thread. The caller keeps a reference to the returned
+`Worker` until it fires (`AdjustmentPanel._workers`,
+`MainWindow._workers`).
 
 `MainWindow` shows a busy indicator (an indeterminate `QProgressBar` in
-the status bar) for as long as any background operation is in flight:
-`AdjustmentPanel.busy_changed` (emitted around reconstruct/find
-COR/find tilt) and `MainWindow`'s own import worker both go through
-`_push_busy()`/`_pop_busy()`, a counter rather than a boolean, so
-several imports started at once don't hide the bar the moment the
-first one finishes.
+the status bar) for as long as any background operation is in flight,
+via `_push_busy()`/`_pop_busy()` (a counter, not a boolean).
 
 ## Import
 
 `File > Import` and `File > Import to RAM` both open `ImportDialog`,
 differing only in the `storage_mode` passed to it. The dialog stages
 paths (`Open File`: multi-select hdf5; `Open Folder(s)`: multi-select
-tiff project folders) into a list, `Remove` to drop a staged entry,
-`Import` commits the whole list. No parent-directory scanning --
-selecting a folder is always exactly one tiff project.
+tiff project folders) into a list; `Remove` drops a staged entry;
+`Import` commits the whole list. Selecting a folder is always exactly
+one tiff project.
 
 On commit, `MainWindow._import()` builds one `ProjectConfig` and
-`ProjectSession` per staged item, adds it to the project panel
-immediately, and starts `import_data()` + `complete()` for it in the
-background (`_import_session()`). A `PipelineStageError` from
-`complete()` (e.g. missing `geometry_type`) is recorded on
-`session.error`, not raised -- the project still shows up, still
-selectable, and the missing field gets a chance to be filled in via
-Basic settings before the next reconstruct attempt retries `complete()`.
+`ProjectSession` per staged item, adds it to the project panel, and
+starts `import_data()` + `complete()` for it in the background
+(`_import_session()`). A `PipelineStageError` from `complete()` (e.g.
+missing `geometry_type`) is stored on `session.error`, not raised; the
+project still shows up and stays selectable, and the missing field can
+be filled in via Basic settings before the next reconstruct attempt
+retries `complete()`.
 
 ### Plugin picker
 
-`import_data()` failing is different: `PipelineRun.import_data()`
-wraps every import-time exception (`NoVendorMatchError`,
-`AmbiguousVendorMatchError`, `ProjectImportError`, `ValueError`) into
-one generic `PipelineStageError`, but `raise ... from e` preserves the
-original as `.__cause__`, so `_import_session()`'s `failed()` can still
-tell them apart without touching backend code.
+`import_data()` failing wraps every import-time exception
+(`NoVendorMatchError`, `AmbiguousVendorMatchError`,
+`ProjectImportError`, `ValueError`) into one `PipelineStageError`,
+keeping the original as `.__cause__`.
 
-On the *first* failure, `PluginPickerDialog` (`gui/plugin_picker_dialog.py`)
-is offered only when the cause was `NoVendorMatchError`/`AmbiguousVendorMatchError`
--- detection genuinely didn't resolve, as opposed to a plugin being
-found but the file lacking what it needs (`ProjectImportError`), which
-picking a different plugin can't fix either way. It lists
+`PluginPickerDialog` (`gui/plugin_picker_dialog.py`) is offered when
+the cause is `NoVendorMatchError`/`AmbiguousVendorMatchError`. It lists
 `get_plugins(session.config.format)` by name; picking one sets
-`session.config.plugin_name` (bypassing `detect()` entirely on retry,
-the same escape hatch `ProjectConfig.plugin_name` already existed for)
-and calls `_import_session()` again. Cancel calls
-`ProjectPanel.remove_session()` -- the row was only ever in the list
-provisionally, as an "importing" placeholder, and giving up means no
-plugin is ever going to open this file, so there is nothing left to
-show a permanently-red row for.
+`session.config.plugin_name` and retries `_import_session()`. Cancel
+calls `ProjectPanel.remove_session()`.
 
-If that retry *also* fails, `failed()` offers the picker again
-regardless of the new exception type -- once `session.config.plugin_name`
-is set, any further failure means the user's own pick didn't work
-either, not that detection needs another chance. Only a project whose
-own import actually failed ever sees this dialog; a batch import's
-other, successful projects are untouched.
-
-Structural note: `NoVendorMatchError` specifically (not
-`AmbiguousVendorMatchError`) can only happen when the file has no
-recognizable projection data at all -- `generic_hdf5`/`generic_tiff`
-(the low-specificity fallbacks) match *any* hdf5 file with a 3D
-dataset or *any* tiff folder with at least one file, so anything with
-real data always matches at least one of them. That means picking a
-different plugin can only ever rescue an `AmbiguousVendorMatchError`,
-never a true `NoVendorMatchError` -- confirmed directly (`gui_samples/broken_no_plugin.h5`,
-picking `generic_hdf5` for it fails with `ProjectImportError` instead,
-re-offering the picker as designed).
+If the retry also fails, the picker is offered again regardless of the
+new exception type. Picking a different plugin can only ever resolve
+an `AmbiguousVendorMatchError`, not a true `NoVendorMatchError`: the
+low-specificity fallback plugins (`generic_hdf5`/`generic_tiff`) match
+any hdf5 file with a 3D dataset or any tiff folder with at least one
+file, so a `NoVendorMatchError` means no plugin recognizes the file's
+data at all.
 
 ## Project panel
 
-`ProjectPanel` is a `QTreeWidget`, not a custom `QAbstractItemModel`.
-It was originally a `QTableView` over a `QAbstractTableModel` with a
-raw `Qt.CheckStateRole` checkbox column; that combination turned out
-unreliable for checkbox clicks in practice. `QTreeWidgetItem`'s own
-`setCheckState()`/`itemChanged` (the same mechanism BAMline4CT used)
-handles it natively, so the panel was rebuilt on that instead.
+`ProjectPanel` is a `QTreeWidget`. One top-level item per session
+(`project_id`, checkable), with child rows underneath it for Status,
+Center of rotation, Tilt, Format, Storage (`INFO_FIELDS`).
+`refresh(session)` updates an existing item's text in place, keyed by
+`id(session)` in `ProjectPanel._items`. `MainWindow` connects
+`AdjustmentPanel.session_changed` to `refresh()`.
 
-One top-level item per session (`project_id`, checkable), with four
-child rows underneath it: Center of rotation, Tilt, Format, Storage
-(`INFO_FIELDS`/`_info_values()`). `refresh(session)` updates an
-existing item's text in place (`ProjectPanel._items`, keyed by
-`id(session)`); the tree is never torn down and rebuilt.
-`AdjustmentPanel.session_changed` (emitted whenever center/tilt
-actually change, manually or via Find COR/Find tilt) is what
-`MainWindow` connects to `refresh()`.
+Three independent states per row:
 
-Three independent things a row can be:
-
-- **checked**: the top-level item's checkbox. Marks membership in a
-  future batch action (`checked_sessions()`). Not implemented yet.
+- **checked**: the top-level item's checkbox. `checked_sessions()`
+  returns every checked session.
 - **selected**: `QTreeWidget`'s native row selection.
-- **opened**: `itemDoubleClicked` on the top-level item or any of its
-  children (`item.parent() or item` resolves either to the session),
-  emits `project_opened`. `MainWindow._open_project()` loads that
-  project's projections into the viewer and points the adjustment
-  panel at it. Independent of checked/selected.
+- **opened**: double-clicking the top-level item or any child emits
+  `project_opened`; `MainWindow._open_project()` loads that project
+  into the viewer and points the adjustment panel at it.
 
 ### Status color
 
-Each row's `Status` child (first of the five `INFO_FIELDS`) and the
-project name itself are colored by `_status_of(session)` /
-`_STATUS_COLORS`, four states rather than the original three-state
-plan (red/gray/green) -- a hard import failure needed its own color,
-reusing "needs_input"'s would have conflated "fixable by filling in a
-field" with "not fixable from this panel at all":
+`_status_of(session)` / `_STATUS_COLORS` color the Status child and
+the project name:
 
 | State | Color | Condition |
 |---|---|---|
-| importing | blue | `session.run is None`, `session.error is None` -- in flight |
-| error | red | `session.run is None`, `session.error` set -- import itself failed (`NoVendorMatchError`, etc.), nothing here to fill in. Transient: only visible while the plugin picker is offered (see "Plugin picker" above); canceling removes the row instead of leaving it red |
+| importing | blue | `session.run is None`, `session.error is None` |
+| error | red | `session.run is None`, `session.error` set |
 | needs_input | orange | `project.needs_user_input()` |
 | ready | gray | resolved, not yet reconstructed |
 | reconstructed | green | `run.volume is not None`, or `session.exported` |
 
-`session.exported`: `run_batch()` (used by `MainWindow._reconstruct_selected()`,
-the "Reconstruct selected" batch action) builds its own internal
-`PipelineRun` per config and never hands back the volume, so
-`session.run.volume` -- what a single-project reconstruct in
-`AdjustmentPanel` populates -- stays `None` even on a successful batch
-export. `_reconstruct_selected()`'s `done()` sets `exported = True` on
-each session `run_batch()` reported successful, the equivalent signal
-for that path.
-
-`MainWindow._open_project()` on a project stuck in "error" reports
-"failed to import: ..." rather than "is still importing" --
-`session.run` stays `None` in both cases (`_import_session()`'s
-`failed()` never sets it), so they need `session.error` to tell them
-apart.
+`session.exported` is set by `MainWindow._reconstruct_selected()`'s
+`done()` handler for each session `run_batch()` reports successful --
+`run_batch()` builds its own internal `PipelineRun` per config and
+never hands back the volume, so `session.run.volume` stays `None` even
+after a successful batch export.
 
 ## Adjustment panel
 
 `AdjustmentPanel` holds a `QTabWidget` (Basic settings, Automatic
 adjustments, Refinements, Save settings) plus two buttons below it,
-outside the tabs: Reconstruct (slice) and Reconstruct all slices.
-Placement outside the tabs is deliberate -- both always act on
-`self.session`, the one currently open project, regardless of which
-tab is active.
+outside the tabs: Reconstruct (slice) and Reconstruct all slices. Both
+always act on `self.session`, the currently open project, regardless
+of which tab is active.
 
-`set_session(session)` is the only entry point that changes which
-project the panel edits; it disables the whole panel when `session` is
-`None`.
+`set_session(session)` is the entry point that changes which project
+the panel edits; it disables the whole panel when `session` is `None`.
 
 ### Basic settings
 
-Geometry type, slice (z, `session.preview_row`, not a `ProjectConfig`
-field), reconstruction algorithm, center of rotation, tilt, and a
-"Load config file..." button (`orchestration.load_config()` on a
-single-project `.ini`, replacing `session.config` -- keeping
-`project_id` -- and resetting `session.run` to `None` so the next
-action starts a fresh `PipelineRun` against the new config).
+Fields: geometry type, angle span, pixel size, slice (z --
+`session.preview_row`, not a `ProjectConfig` field), reconstruction
+algorithm, number of iterations, device, center of rotation, tilt, and
+a "Load config file..." button (`orchestration.load_config()` on a
+single-project `.ini`, replacing `session.config` while keeping
+`project_id`, and resetting `session.run` to `None`).
 
-`preview_row` starts as `None` and resolves to the middle row the
-first time `_refresh_from_session()` knows this project's row count,
-the same pattern `center` uses for `width / 2.0` -- an arbitrary `0`
-is not a useful default for either.
+`angle_span`/`geometry_type` write into
+`session.config.completion_answers` when changed -- these are
+completion's "ask" fields, resolved here rather than in a separate
+dialog. `angle_span_spin` is disabled, with a tooltip, whenever its
+value is read from the file's own recorded angles rather than typed by
+the user.
 
-Completion's "ask" fields live here, not in a separate dialog:
-`geometry_type` and, now, `angle_span` both write directly into
-`session.config.completion_answers` when changed. `angle_span` is one
-field, not a start/end angle pair -- `completion/derivers.py`'s
-`derive_angles()` always builds `angles` as `np.linspace(0, angle_span,
-n, endpoint=False)`, so only the span (end - start) is ever consumed;
-an absolute start angle would have no effect on the derived array,
-which is why the UI doesn't offer one. Defaults to `180.0` (the common
-half-turn-scan case) until a resolved value is known
-(`DataInterface.get_metadata("angle_span")`) or the user has already
-typed one (`completion_answers["angle_span"]`, checked first). Confirmed
-directly: `gui_samples/needs_geometry.h5` (matched by the `generic_hdf5`
-fallback, which provides neither `angles` nor `angle_span`) goes from
-`missing_soft_fields() == ['geometry_type', 'angles', 'angle_span']` to
-fully resolved once both `geometry_type` and `angle_span` are supplied
-through Basic settings -- `angles` derives from the user-supplied span.
+`pixel_size_spin` is disabled only when `DataInterface.get_metadata_source("voxel_size") == "file"`;
+otherwise it's editable, writing into
+`completion_answers["voxel_size"]`.
 
-`angle_span_spin` is disabled (with an explanatory tooltip) whenever
-its value comes from `DataInterface.get_metadata("angle_span")` rather
-than from the user -- i.e. the file's own recorded angles already give
-an exact answer, editing it here would do nothing until a re-import
-anyway. A value like `179.55` in that state is not a rounding bug: it's
-`derive_angle_span()`'s `max(angles) - min(angles)`, and a scan whose
-angles were generated `np.linspace(0, 180, n, endpoint=False)` (never
-re-measuring the start angle as the end angle) is exactly `180 -
-180/n` degrees short of `180`. `max - min` is deliberately the
-derivation used rather than assuming `endpoint=False` and adding the
-step back in -- a real scan that does record the redundant endpoint
-would then be overcounted by one step instead.
+The reconstruction-algorithm combo lists every registered backend
+except `algotom_gridrec` (needs `tomopy`, conda-only, no pip wheel --
+usable via the CLI/scripting API instead). An "Iterations" spin box
+(`num_iter_spin`, writing into
+`session.config.reconstruction_options["num_iter"]`) is shown only for
+the four iterative backends (SIRT/SART/ART/CGLS --
+`ReconstructionBackend.is_iterative`); it's seeded with `50` for
+SIRT/SART/CGLS, or `n_angles * width` for ART, the first time an
+iterative backend is selected and no value is already set. Switching
+backends again never overwrites an already-set value. A device combo
+(`_DEVICE_CHOICES`: Auto/CPU/GPU) writes into `session.config.device`;
+`reconstruction.resolve_device()` reports which device a reconstruction
+actually used in the status message afterward.
 
-`pixel_size_spin` follows the same greyed-out-when-real pattern, but
-keyed by *source*, not presence: `voxel_size` (`core/known_fields.py`)
-has only a `"default"` strategy, never `"ask"`, so it always resolves
-to *something* -- silently defaulting to `1.0` um when no plugin
-reported a real one, never showing up in `missing_soft_fields()` at
-all. `DataInterface.get_metadata_source("voxel_size") == "file"` is
-what actually distinguishes a real value from that silent default; the
-box is disabled only in the "file" case, editable (writing into
-`completion_answers["voxel_size"]`, same mechanism as `angle_span`)
-whenever it's a default or a still-pending user answer. This exists
-purely so a defaulted pixel size is visible and fixable -- not because
-completion would otherwise get stuck, unlike `angle_span`/`geometry_type`.
-
-Backend list intentionally excludes `algotom_gridrec` even though it's
-a registered backend: it needs `tomopy`, which has no pip wheel at all
-(conda-only) -- see doc/RECONSTRUCTION.md's "Built-in backends".
-
-An "Iterations" spin box (`num_iter_spin`, writing into
-`session.config.reconstruction_options["num_iter"]`) appears only for
-the four iterative backends -- SIRT/SART/ART/CGLS,
-`ReconstructionBackend.is_iterative` -- and is hidden for the rest,
-which ignore it. This exists because `reconstruction_options` otherwise
-stays `{}`, and algotom's own default when `num_iter` is never passed
-is `1`: a single sweep, nowhere near converged, which is exactly why an
-iterative backend can come out looking wildly different from FBP/
-gridrec/BPF/DFI (those are direct, non-iterative inversions -- always
-fully "converged" by construction) if this control didn't exist.
-`_refresh_from_session()` seeds a real value the first time an
-iterative backend is selected and `"num_iter"` isn't already set --
-`50` for SIRT/SART/CGLS, but `n_angles * width` for ART specifically,
-confirmed directly (`reconstruction/backends/algotom_astra.py`) to need
-an iteration count on that order because ASTRA's plain `ART` counts
-individual ray updates, not full sweeps, unlike the other three. Once
-set, switching backends again never silently overwrites a value the
-user (or this seeding) already put there -- only a still-unset
-`"num_iter"` gets a default, same "resolve once" rule as
-`center`/`preview_row`/`export_rows`. `_on_backend_changed()` re-runs
-`_refresh_from_session()` in full after updating
-`reconstruction_backend`, so the spin box's visibility, value, and
-tooltip (which warns specifically about ART's different iteration
-semantics) stay in sync with whatever's selected.
-
-A device combo (`_DEVICE_CHOICES`: Auto/CPU/GPU, writing into
-`session.config.device`) sits next to it; `reconstruction.resolve_device()`
-reports which device a reconstruction actually used (not just the
-hint) in the status message afterward, since a backend defaulting to
-"try GPU, fall back to CPU" gives no other way to tell what happened --
-confirmed directly to matter: running on a real GPU workstation gave no
-indication either way before this existed.
-
-The reconstruct status message also always states the unit (`1/cm`)
-and, when `voxel_size`'s source isn't `"file"`, appends a caveat that
-the scale may not be accurate -- `1/cm` is only physically meaningful
-once pixel size is a real, measured value; see doc/RECONSTRUCTION.md's
-"Units" section.
+The reconstruct status message states the unit (`1/cm`) and, when
+`voxel_size`'s source isn't `"file"`, appends a caveat that the scale
+may not be accurate.
 
 ### Automatic adjustments
 
-Find center of rotation: `build_reference()` +
-`normalize_slice()` on the stack's middle row + `find_center()`.
+**Find center of rotation**: `build_reference()` +
+`normalize_slice()` on the stack's middle row, then `find_center()`.
 Writes the result into `session.config.center` and the Basic settings
 field.
 
-Find tilt: forces `session.config.rows = None`, calls
-`PipelineRun.preprocess()` (full stack), then `find_tilt()` on
+**Find tilt**: sets `session.config.rows = None`, runs
+`PipelineRun.preprocess()` on the full stack, then `find_tilt()` on
 `run.normalized`. Writes `tilt_deg` the same way.
 
-Both flag the result in the status message, not block it, if it falls
-outside what a real setup produces: `center` more than
-`MAX_PLAUSIBLE_COR_OFFSET_FRACTION` (2%) of the width from the image's
-midpoint, or `abs(tilt_deg)` over `MAX_PLAUSIBLE_TILT_DEG` (1 degree).
-Both constants live at the top of `adjustment_panel.py`. `center` is
-an absolute column index end to end (`calibration.find_center()`
-through `ProjectConfig.center` through `reconstruction.reconstruct()`,
-confirmed against `calibration/backends/algotom_cor.py` and
-`reconstruction/backends/algotom_fbp.py`), not a deviation from
-center, despite `core/known_fields.py`'s `center_of_rotation` unit
-string saying otherwise -- that appears to be a stale doc comment
-elsewhere, unrelated to `gui/`.
-
-Each `done()` handler also calls `self._reconstruct(all_slices=False)`
-once it's written the new value, so the viewer's preview reflects the
-correction immediately rather than waiting for a separate click.
+Both flag the result in the status message (not block it) if it falls
+outside `MAX_PLAUSIBLE_COR_OFFSET_FRACTION` (2% of width from the
+image's midpoint) or `MAX_PLAUSIBLE_TILT_DEG` (1 degree). Both also
+trigger `self._reconstruct(all_slices=False)` once the new value is
+written, so the viewer's preview updates immediately.
 
 ### Refinements
 
-Placeholder. Ring/zinger removal (`ProjectConfig.zinger_removal`,
-`ring_correction`, ...) is not wired to any control yet.
+Placeholder tab. Ring/zinger removal
+(`ProjectConfig.zinger_removal`/`ring_correction`) has no control here
+yet.
 
 ### Save settings
 
-Everything here only ever affects `MainWindow._reconstruct_selected()`
-("Reconstruct selected", the one action that exports) -- Adjustment's
-own two reconstruct buttons are preview-only and never call
-`postprocess()`/export, so none of this has any effect on them. Values
-live on `session.config` (`dtype`, `dtype_clip_min/max`) as usual, but
-the slice range and crop rect live on `ProjectSession`
-(`export_rows`/`export_crop_yx`) instead, not `ProjectConfig` --
-neither means anything to orchestration on its own; both get
-translated into the config fields orchestration already understands
-(`rows`/`crop`) only at the moment `_reconstruct_selected()` actually
-runs, per checked project, right where the RAM check already computes
-`n_rows`/`width` for that project anyway. Doing this translation at
-export time rather than storing it pre-translated matters for the RAM
-check specifically: it can now estimate against the *restricted* row
-count instead of the full volume's.
+Everything here affects `MainWindow._reconstruct_selected()`
+("Reconstruct selected", the one action that exports) --
+Adjustment's own two reconstruct buttons are preview-only. `dtype`,
+`export_format`, and `stream` live on `session.config` directly; the
+slice range and crop rect live on `ProjectSession`
+(`export_rows`/`export_crop_yx`), translated into `config.rows`/
+`config.crop` only when `_reconstruct_selected()` runs.
 
-**Stream to disk (low RAM)**: `session.config.stream`, straight on
-`ProjectConfig` like `dtype`/`export_format` (not GUI-only) -- see the
-top-level "Streaming" section below for what it actually does and what
-it requires.
+**Stream to disk (low RAM)**: `stream_checkbox`, writing into
+`session.config.stream` -- see "Streaming" below.
 
-**Clip min/max**: enabled only when `dtype == "uint16"` --
-`to_uint16()` has no clipping step at all for `float32`. "Use preview
-slice's range" copies the last single-slice preview's own actual
-min/max into the two fields -- not a cosmetic shortcut: a batch
-export's volume is built and exported entirely inside `run_batch()`,
-never materialized in the GUI process at all, so there is no other
-cheap way to estimate sensible clip bounds before running a
-potentially large export. Leaving both fields alone keeps
-`to_uint16()`'s own default (the exported volume's own min/max,
-computed for real at export time).
+**Clip min/max**: enabled only when `dtype == "uint16"`.
+"Use preview slice's range" copies the last single-slice preview's own
+min/max into the two fields. Leaving both fields at their default (0)
+lets `to_uint16()` use the exported volume's own min/max instead,
+computed at export time.
 
-**From slice / to slice**: `session.export_rows`, BOTH INCLUSIVE
-("slices 100 to 500" means literally that) -- resolves to the full
-range the first time a session's row count becomes known, same
-"resolve once" pattern `preview_row` already uses. Converted to
-Python's half-open `slice(start, end + 1)` (or `None` for the
-unrestricted full-range case, matching existing behavior exactly) only
-inside `_reconstruct_selected()`.
+**From slice / to slice**: `session.export_rows`, both inclusive.
+Resolves to the full range the first time a session's row count is
+known. Converted to Python's half-open `slice(start, end + 1)` (or
+`None` for the unrestricted case) only inside
+`_reconstruct_selected()`.
 
-**Crop**: a `pg.RectROI` `ImageViewer` owns directly
-(`_crop_roi`) -- deliberately not `pg.ImageView`'s own built-in `.roi`,
-which is wired to the `roiPlot` already hidden for the frame slider and
-isn't reusable for this. Hidden by default; the checkbox shows it,
-seeding a non-degenerate 80%-of-frame default the first time a session
-turns cropping on with no stored rect yet
-(`ImageViewer.set_crop_visible()`), or restoring that session's own
-already-stored rect otherwise (`set_crop_rect()`, which -- like
-`BasicSettingsTab.set_values()`'s fields -- blocks the ROI's own
-signal so restoring doesn't get mistaken for a new user edit).
-Dragging it (`sigRegionChangeFinished`) writes `(y0, y1, x0, x1)`,
-half-open, straight into `session.export_crop_yx`; switching sessions
-syncs the box to whichever one's own rect (or hides it, if that
-session never turned cropping on) -- each project's crop is
-independent, since the ROI widget is one shared UI element reflecting
-whichever project is currently open, the same relationship `angle_span`/
-`pixel_size`/`device` already have to their own widgets.
+**Crop**: a `pg.RectROI` (`ImageViewer._crop_roi`), hidden by default.
+The checkbox shows it, seeding an 80%-of-frame default the first time,
+or restoring the session's own stored rect otherwise. Dragging it
+writes `(y0, y1, x0, x1)`, half-open, into `session.export_crop_yx`.
+Four spin boxes ("Starting point"/"End point", x/y) mirror the box
+both ways: dragging updates them, and typing into them moves the box
+(`crop_rect_edited` -> `ImageViewer.set_crop_rect()`).
+`get_crop_rect()` does not clamp against the viewer's currently
+displayed frame -- an out-of-range crop is harmless; numpy slicing
+clips it silently wherever `config.crop` is applied in
+`postprocess()`.
 
-Four spin boxes mirror the box both ways, laid out as two rows --
-"Starting point" (x, y) and "End point" (x, y) -- rather than one row
-of terse `y0`/`x0`-style labels: dragging updates them
-(`set_crop_spins()`, silent, same reasoning as `set_crop_rect()`), and
-typing into them moves the box (`crop_rect_edited` ->
-`ImageViewer.set_crop_rect()`) -- useful on its own for a
-reproducible, typed-in crop, not only as a readout of a drag.
-
-`get_crop_rect()` deliberately does NOT clamp against the viewer's
-currently displayed frame's own shape, confirmed directly to be wrong:
-which frame that is (a raw, lazily-loaded projection, or a
-reconstructed preview -- different shapes) changes every time a
-project is opened or reopened, independent of the crop box's own
-position, so a rect drawn against a 300x300 reconstructed preview was
-getting silently zeroed out the moment `_open_project()` put the
-viewer back on a `(32, 300)` raw projection stack. An out-of-range
-crop is harmless regardless -- numpy slicing clips silently wherever
-`config.crop` is actually applied (`postprocess()`).
-
-Rotation is still not implemented: there is no backend concept of a
-post-reconstruction image rotation yet -- `tilt_deg` is rotation-axis
-tilt, corrected during calibration, a different thing entirely from an
-output-image rotation. Deliberately deferred; not planned for this
-iteration.
+Rotation (a post-reconstruction image rotation, distinct from
+rotation-axis tilt) is not implemented.
 
 ### Reconstruct scope
-
-Three actions, distinguished by which panel owns the button rather
-than by label, so scope is never ambiguous:
 
 | Action | Panel | Scope | Rows |
 |---|---|---|---|
 | Reconstruct (slice) | Adjustment | one project, current row | `slice(preview_row, preview_row + 1)` |
 | Reconstruct all slices | Adjustment | one project, every row | `None` |
-| Reconstruct selected | Project | every checked project | per project, from Save settings' `export_rows` -- see below |
+| Reconstruct selected | Project | every checked project | per project, from Save settings' `export_rows` |
 
-Both adjustment-panel actions call
-`_run_pipeline_to_reconstruction()`: `import_data()` if not already
-done, `complete()`, `preprocess()`, `calibrate()`, `reconstruct()`.
-Neither exports; both only ever update `self.viewer`.
+Both adjustment-panel actions call `_run_pipeline_to_reconstruction()`:
+`import_data()` if not already done, `complete()`, `preprocess()`,
+`calibrate()`, `reconstruct()`. Neither exports; both only update
+`self.viewer`.
 
 `ProjectPanel.reconstruct_selected_btn` ("Reconstruct selected") is the
-only action that exports. `MainWindow._reconstruct_selected()` takes
-`checked_sessions()`'s configs and passes them straight to
-`orchestration.run_batch()` -- the same function `tomo batch` uses --
-in one background worker, so the batch stays sequential (`run_batch()`
-is deliberately sequential itself; see ORCHESTRATION.md) and one
-project's failure doesn't stop the rest. Each `PipelineConfig`'s
-`export_path` is set at import time (`MainWindow._import()`) to
-`<source file's directory>/<project_id>_volume.h5`, next to the data
-it came from, rather than `PipelineRun`'s own default of the current
-working directory.
+only action that exports. `MainWindow._reconstruct_selected()` passes
+`checked_sessions()`'s configs to `orchestration.run_batch()` (the same
+function `tomo batch` uses) in one background worker. Each config's
+`export_path` is set at import time to
+`<source file's directory>/<project_id>_volume.h5`.
 
 Before dispatching, `_reconstruct_selected()` translates each checked
-session's `export_rows`/`export_crop_yx` (Save settings, GUI-only --
-see "Save settings" above) into that session's `config.rows`/`config.crop`
-(orchestration-level, what `run_batch()` actually reads), right at the
-same point it already computes `n_rows`/`width` for the RAM check --
-which is exactly why the RAM estimate uses the *restricted* row count
-when a range is set, not the full volume's.
-
-A project still importing is skipped before the batch starts, reported
-in the status bar, and not passed to `run_batch()`. So is a project
-whose reconstructed volume is estimated not to fit in available RAM
-(see "RAM check" below) -- *unless* Save settings' "Stream to disk"
-is checked for it, in which case the whole-volume RAM estimate doesn't
-apply at all; see "Streaming" below.
+session's `export_rows`/`export_crop_yx` into that session's
+`config.rows`/`config.crop`. A project still importing is skipped
+before the batch starts and reported in the status bar. So is a
+project whose reconstructed volume is estimated not to fit in
+available RAM (see "RAM check" below), unless "Stream to disk" is
+checked for it.
 
 ## RAM check
 
-`AdjustmentPanel`'s own two reconstruct buttons (preview only, never
-export) and `_reconstruct_selected()`'s normal, non-streaming path both
-go through `reconstruct()`/`postprocess()`/`export()`, which take and
-return a full in-memory array -- so the whole output volume has to fit
-in RAM. `orchestration/ram_check.py`'s `estimate_volume_bytes(n_rows,
-width)` assumes a square `(width, width)` output slice (true for every
-registered backend) at float32, times `SAFETY_FACTOR` (2.5, a margin
-for backend buffers and a dtype-conversion in `postprocess()` briefly
-holding both the old and new array, not a measured figure) against
+`AdjustmentPanel`'s own two reconstruct buttons and
+`_reconstruct_selected()`'s non-streaming path go through
+`reconstruct()`/`postprocess()`/`export()`, which take and return a
+full in-memory array. `orchestration/ram_check.py`'s
+`estimate_volume_bytes(n_rows, width)` assumes a square `(width,
+width)` output slice at float32, times `SAFETY_FACTOR` (2.5), against
 `psutil.virtual_memory().available`. Under that, the reconstruction is
-refused before it starts rather than left to hang or thrash. This
-check is skipped entirely for a session with "Stream to disk" checked
--- see "Streaming" below.
+refused before it starts. Skipped entirely for a session with "Stream
+to disk" checked.
 
 ## Streaming
 
-Save settings' "Stream to disk (low RAM)" checkbox
-(`SaveSettingsTab.stream_checkbox`, writing straight into
-`session.config.stream` via the same `changed` signal `dtype_combo`/
-`format_combo` already use) switches `_reconstruct_selected()`'s
-`run_batch()` call over to `PipelineRun._run_streaming()`
-(`orchestration/pipeline.py`) for that project: it reconstructs and
-writes one chunk of rows (slices) at a time -- sized by
-`orchestration/ram_check.py`'s `estimate_chunk_rows()`, or
-`stream_chunk_rows` if set explicitly -- so only one chunk's raw/
-normalized/reconstructed data is ever in memory, never the whole
-volume. This is the same `run_all()`/`run_batch()` every other caller
-(the CLI's `tomo run`/`tomo batch`) already goes through, so the GUI
-needed no reconstruction-loop code of its own, just this one checkbox.
+Save settings' "Stream to disk (low RAM)" checkbox writes into
+`session.config.stream`, switching `_reconstruct_selected()`'s
+`run_batch()` call to `PipelineRun._run_streaming()` for that project:
+one chunk of rows at a time, sized by
+`orchestration/ram_check.py`'s `estimate_chunk_rows()` or
+`stream_chunk_rows` if set explicitly.
 
-Streaming needs `config.center` already resolved -- always true here,
-since `_refresh_from_session()` already defaults it to the image
-center the moment a project is opened, before any button is clicked --
-and, for a uint16 export, `dtype_clip_min`/`dtype_clip_max` set
-explicitly (typed, or "Use preview slice's range"): there's no
-whole-volume min/max to discover a chunk at a time. Both are enforced
-by `_run_streaming()` itself, raising a clear `PipelineStageError`
-rather than silently falling back to loading the whole raw stack once
-to auto-calibrate -- exactly what streaming exists to avoid. See
-`_run_streaming()`'s own docstring, and doc/RECONSTRUCTION.md's
-"Streaming" section, for the full contract (including how a crop's
-z-range and a tilted, per-row center are handled a chunk at a time
-without changing the reconstructed values from what the non-streaming
-path would produce).
+Requires `config.center` already resolved (always true here) and, for
+a uint16 export, `dtype_clip_min`/`dtype_clip_max` set explicitly.
+`_run_streaming()` raises `PipelineStageError` if either is missing.
+See doc/RECONSTRUCTION.md's "Streaming" section for the full contract.
 
 ## Viewer
 
-`ImageViewer` wraps a single `pyqtgraph.ImageView`, but hides its
-built-in frame slider (`ImageView.ui.roiPlot`) and drives its own
-(`_frame_slider`/`_frame_label`) instead, through one shared path
-(`_set_source()`/`_show_frame()`/`_frame_at()`) for both of its two
-sources:
+`ImageViewer` wraps a `pyqtgraph.ImageView`, replacing its built-in
+frame slider with its own (`_frame_slider`/`_frame_label`), through one
+shared path (`_set_source()`/`_show_frame()`/`_frame_at()`):
 
 - `show_stack(array)` / `show_image(array)`: an eager, fully-in-memory
-  numpy array -- a reconstructed volume/slice. `reconstruct()` always
-  returns the whole thing already, so there's no laziness to preserve
-  here; `show_image()` is just `show_stack()` with `array[np.newaxis]`
-  (one frame).
+  numpy array (a reconstructed volume/slice). `show_image()` is
+  `show_stack()` with `array[np.newaxis]`.
 - `show_stack_lazy(frame_getter, n_frames)`: `frame_getter(i)` is
-  called for exactly the one frame currently on screen, initially and
-  on every slider move -- never the whole stack. `MainWindow._open_project()`
-  passes `DataInterface.get_projections` (bound, so `frame_getter(i)`
-  is `get_projections(index=i)`) for this. `get_projections()` with no
-  index -- what `_open_project()` used to call -- reads the entire
-  stack regardless of `storage_mode`; `get_projections(i)` reads just
-  that one h5py slice or one tiff file, for either format, is what
-  makes disk mode's laziness actually hold on opening a project. A
-  sinogram (one row across every angle) is a different access pattern
-  with no equivalent shortcut for tiff -- building one still means
-  opening every file, which is why `preprocessing.normalize_slice()`/
-  `normalize_rows()` (used by calibration/reconstruction, not by the
-  viewer) do exactly that when they need one.
+  called for exactly the one frame on screen, initially and on every
+  slider move. `MainWindow._open_project()` passes
+  `DataInterface.get_projections` (bound) for this --
+  `get_projections(index=i)` reads just one h5py slice or one tiff
+  file, for either storage mode.
 
 Scrubbing the slider does not reset zoom/pan/contrast; loading a new
-source (`_set_source()`) does (`reset_view=True` only on frame 0 of a
-fresh source, passed through as `setImage()`'s `autoLevels`/`autoRange`).
-
-No ROI tools (crop box, line profile, rotation-angle line) wired up
-yet -- pyqtgraph has them, nothing in `gui/` uses them.
+source does.
 
 A `QLabel` under the slider reads out `x`/`y`/`value` under the
-cursor, via `ImageView.scene.sigMouseMoved` ->
-`ImageView.view.mapSceneToView()` -> a floor to pixel indices. Reads
-from `ImageViewer._current_frame` (the frame `_show_frame()` most
-recently displayed, cached specifically so hovering never triggers its
-own disk read in lazy mode), not from `imageItem.image` -- pyqtgraph
-stores that transposed (`(x, y)`) internally regardless of the `axes=`
-used to display it, so indexing it directly would silently
-re-introduce the row/column mixup `show_image()`'s explicit `axes=`
-(still passed on every `setImage()` call, in `_show_frame()`) exists to
-avoid.
+cursor, from `ImageViewer._current_frame` (the most recently displayed
+frame, cached so hovering doesn't trigger a disk read in lazy mode).
 
 ## What isn't built yet
 
-- Copy-settings-between-projects, the checkbox's second consumer
-  (alongside Reconstruct selected).
+- Copy-settings-between-projects.
 - Dock layout persistence.
-- Crop/clip/rotation controls, and any viewer-driven ROI control (crop
-  box, line profile) -- the pixel-value readout is built (see Viewer,
-  above), the rest of the ROI tools aren't.
+- Rotation control (post-reconstruction image rotation).
 - Refinements tab (ring/zinger removal).
 - Import-from-config (loading a batch `.ini` directly into the project
-  panel, rather than one project's `.ini` via Basic settings).
-- Basic settings has a UI for two completion "ask" fields
-  (`geometry_type`, `angle_span`), not every one `core/known_fields.py`
-  defines. `source_to_detector_distance`/`source_to_object_distance`
-  (mandatory_soft, `ask`-only, conditional on `geometry_type == "cone"`)
-  have no UI at all -- selecting "cone" in Basic settings' geometry
-  combo makes both newly required with no way to answer them from this
-  panel, the same permanently-`needs_input` situation `angle_span` was
-  in before this was built. `voxel_size` doesn't need one (`default`
-  strategy, auto-resolves); `sample_name`/`operator` are `optional`,
-  never blocking.
+  panel).
+- A UI for `source_to_detector_distance`/`source_to_object_distance`
+  (required, `ask`-only, only when `geometry_type == "cone"`).
 - No cross-session guard on background operations: if the open project
   changes while a reconstruct/find-COR/find-tilt worker for the
-  previous one is still in flight, its `done()` callback still updates
-  the viewer/Basic settings unconditionally when it lands, showing
-  another project's result. Known, not yet fixed.
+  previous one is still in flight, its result still updates the
+  viewer/Basic settings for whichever project is open when it lands.
 - `ProjectObject.close()` (releases a disk-mode project's open
-  `h5py.File`) is never called -- not on app exit, not when a
-  session's `run` is replaced (`_load_config_file()`). No "close/remove
-  a project" action exists yet for this to hook into.
+  `h5py.File`) is never called.

@@ -87,31 +87,27 @@ settings, shown only for those four backends -- see
 doc/GUI_ARCHITECTURE.md's "Basic settings" section; via the CLI/
 scripting API, pass `num_iter` explicitly in `reconstruction_options`.
 
-`algotom_art` is a trap if used like the other three: ASTRA's plain
+`algotom_art` behaves differently from the other three: ASTRA's plain
 `'ART'` counts individual ray (row) updates, not full sweeps over every
-projection the way SIRT/SART/CGLS's `num_iter` does. Confirmed directly
-(`tests/test_reconstruction.py`): the same `num_iter=50` that works
-fine for SIRT/SART/CGLS reconstructs ART to exactly zero on one test
-case and barely-started on another. Pass something on the order of
-`n_projections * width` (one full sweep-equivalent) instead. There is
-no warning from ASTRA when this is too low.
+projection the way SIRT/SART/CGLS's `num_iter` does. `num_iter=50`,
+which is enough for SIRT/SART/CGLS, reconstructs ART to zero or
+barely-started (see `tests/test_reconstruction.py`). Pass something on
+the order of `n_projections * width` (one full sweep-equivalent)
+instead. ASTRA gives no warning when this is too low.
 
-`algotom_gridrec` needs `tomopy`, which `gridrec_reconstruction()`
-defers to entirely (confirmed directly: it's a thin wrapper, not an
-algotom-native implementation) -- and TomoPy has no pip wheel at all,
-conda-only (`conda install -c conda-forge tomopy`). For that reason
-it's deliberately left out of the GUI's reconstruction-algorithm list
-(see `gui/adjustment_panel.py`); it's still a registered backend,
-usable directly via the CLI/scripting API if you've set tomopy up
-yourself.
+`algotom_gridrec` needs `tomopy` -- `gridrec_reconstruction()` is a
+thin wrapper around it, not an algotom-native implementation -- and
+TomoPy has no pip wheel, conda-only (`conda install -c conda-forge
+tomopy`). It's left out of the GUI's reconstruction-algorithm list for
+that reason (see `gui/adjustment_panel.py`); it's still a registered
+backend, usable via the CLI/scripting API once tomopy is installed.
 
 `resolve_device(backend, device)` reports which device a call will
 actually use (or did use), accounting for real hardware, not just the
 `device` hint -- see `ReconstructionBackend.actual_device()`. Every
-backend but `algotom_gridrec`/`algotom_dfi` (no GPU path in algotom at
-all) checks the same `numba.cuda.is_available()` that `fbp_reconstruction()`/
-`astra_reconstruction()` use internally, so it can't disagree with what
-actually happened.
+backend but `algotom_gridrec`/`algotom_dfi` (no GPU path in algotom)
+checks the same `numba.cuda.is_available()` that
+`fbp_reconstruction()`/`astra_reconstruction()` use internally.
 
 ## Units
 
@@ -241,54 +237,38 @@ result = PipelineRun(config).run_all()
 ```
 
 Chunk size: `stream_chunk_rows`, or, if left `None`,
-`orchestration.ram_check.estimate_chunk_rows(width, max_rows)` --
-sized to keep every CPU core busy in one `reconstruct()` call (every
-registered backend already parallelizes across the slices *within*
-one call internally -- algotom's own joblib/GPU-batched
-implementations, confirmed by reading their source, not assumed --
-so a chunk of 1 row wastes that), unless that many rows wouldn't fit
-in available RAM or there simply aren't that many left, in which case
+`orchestration.ram_check.estimate_chunk_rows(width, max_rows)`. Every
+registered backend parallelizes across the slices within one
+`reconstruct()` call internally, so chunk size is sized to keep every
+CPU core busy in one call, unless that many rows wouldn't fit in
+available RAM or there aren't that many rows left -- in which case
 RAM/the remaining row count wins.
 
-Two things must already be resolved before streaming can run --
-`_run_streaming()` raises a clear `PipelineStageError` otherwise
-rather than silently falling back to the eager path's own auto-find,
-which would mean loading the whole raw projection stack once anyway,
-exactly what streaming exists to avoid:
+Two things must already be resolved before streaming can run;
+`_run_streaming()` raises `PipelineStageError` otherwise:
 
-- `center`: no safe default exists (an arbitrary value would corrupt
-  every reconstructed slice). Resolve it first (interactively, or set
+- `center`: no default exists. Resolve it first (interactively, or set
   it directly).
-- `dtype_clip_min`/`dtype_clip_max`, only if `dtype == "uint16"`:
-  `to_uint16()` would otherwise default to the whole volume's own
-  min/max, not knowable until every chunk has been seen. Set both
-  explicitly, or export as `float32`.
+- `dtype_clip_min`/`dtype_clip_max`, only if `dtype == "uint16"`: set
+  both explicitly, or export as `float32`.
 
-`tilt_deg` is the one exception: left `None`, it's treated as `0.0`
-(no tilt) rather than raising -- a real, zero-cost default (unlike
-`center`), not a discovery step.
+`tilt_deg` left `None` is treated as `0.0` rather than raising.
 
-Chunks may be written in any order, and `StreamingVolumeWriter` relies
-on that rather than working around it: for `format="hdf5"`, the
-dataset is pre-allocated at its final `(total_slices, height, width)`
-shape upfront, so writing is by absolute index
-(`dataset[z0:z1] = chunk`) -- exactly as correct out of order as in
-order, since HDF5 is randomly addressable, not a stream/log. For
-`format="tiff"`, each slice's filename (`slice_00042.tif`) already
-carries its own absolute index. `_run_streaming()` happens to write
-chunks in increasing order, but nothing depends on that.
+Chunks may be written in any order. For `format="hdf5"`, the dataset
+is pre-allocated at its final `(total_slices, height, width)` shape
+upfront, and each chunk is written by absolute index
+(`dataset[z0:z1] = chunk`). For `format="tiff"`, each slice's filename
+(`slice_00042.tif`) carries its own absolute index. `_run_streaming()`
+writes chunks in increasing order, but nothing requires that.
 
 A crop's z-range (`config.crop`'s first tuple) is applied as a write
-filter -- chunks (and the reference/center/tilt math) still cover
-`config.rows`' full range, exactly like the non-streaming path
-(`postprocess()` crops *after* reconstructing that same full range),
-so the reconstructed values come out identical either way; only which
-rows actually get *written* differs. A per-row center, for a nonzero
-tilt, is computed the same way per chunk (`centers_for_rows()`, using
-row positions relative to `config.rows`' own range) that the eager
-path's `calibrate()` computes it for the whole range at once -- again
-so streaming and non-streaming reconstruct identical values for the
-same config, not just similar ones.
+filter: chunks, and the center/tilt math, still cover `config.rows`'
+full range, and `postprocess()`'s non-streaming path also crops after
+reconstructing that same full range -- only which rows get *written*
+differs between the two paths. A per-row center, for a nonzero tilt,
+is computed per chunk (`centers_for_rows()`, using row positions
+relative to `config.rows`' own range) the same way the eager path's
+`calibrate()` computes it for the whole range at once.
 
 ## Writing a backend
 

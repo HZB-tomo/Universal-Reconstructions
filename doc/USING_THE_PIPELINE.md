@@ -242,8 +242,8 @@ with an array of trial centers.
 removal.
 
 If `geometry.detector_pixel_size` is set (stored in micrometers), the
-returned values are attenuation coefficients in inverse micrometers
-(1/um). If it's `None`, they are in "per pixel" units. The result is
+returned values are attenuation coefficients in inverse centimeters
+(1/cm). If it's `None`, they are in "per pixel" units. The result is
 always `float32`. See [`RECONSTRUCTION.md`](./RECONSTRUCTION.md)'s
 "Units" section.
 
