@@ -14,7 +14,7 @@ from core.data_interface import DataInterface
 from data_import.errors import AmbiguousVendorMatchError, NoVendorMatchError
 from orchestration import BatchReport, PipelineRun, PipelineStageError, ProjectConfig, run_batch
 
-from gui import ram_check
+from orchestration import ram_check
 from gui.adjustment_panel import AdjustmentPanel
 from gui.import_dialog import ImportDialog
 from gui.plugin_picker_dialog import PluginPickerDialog
@@ -222,10 +222,19 @@ class MainWindow(QMainWindow):
                 else None
             )
 
-            required = ram_check.estimate_volume_bytes(effective_n_rows, width)
-            if not ram_check.fits_in_available_ram(required):
-                skipped.append(f"{session.project_id}: needs roughly {ram_check.describe(required)}, not enough RAM available")
-                continue
+            # Streaming (Save settings' "Stream to disk") reconstructs
+            # and writes one chunk of rows at a time -- see
+            # PipelineRun._run_streaming() -- so the whole-volume RAM
+            # estimate below doesn't apply; it manages its own,
+            # per-chunk memory footprint instead.
+            if not session.config.stream:
+                required = ram_check.estimate_volume_bytes(effective_n_rows, width)
+                if not ram_check.fits_in_available_ram(required):
+                    skipped.append(
+                        f"{session.project_id}: needs roughly {ram_check.describe(required)}, not enough RAM "
+                        "available -- enable 'Stream to disk' in Save settings to reconstruct it chunk by chunk instead"
+                    )
+                    continue
             configs.append(session.config)
 
         if skipped:

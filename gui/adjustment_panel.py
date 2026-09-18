@@ -34,7 +34,7 @@ from orchestration import PipelineRun, load_config
 from preprocessing import build_reference, normalize_slice
 from reconstruction import get_backend, resolve_device
 
-from gui import ram_check
+from orchestration import ram_check
 from gui.session import ProjectSession
 from gui.viewer import ImageViewer
 from gui.workers import run_in_background
@@ -317,6 +317,24 @@ class SaveSettingsTab(QWidget):
         self.format_combo.addItems(["hdf5", "tiff"])
         self.format_combo.currentTextChanged.connect(self.changed)
 
+        # Chunk-by-chunk reconstruction (PipelineRun._run_streaming(),
+        # via run_batch()/_reconstruct_selected() below): only the
+        # current chunk's data is ever in memory, not the whole
+        # project's volume. Needs center already resolved (always true
+        # here -- see AdjustmentPanel._refresh_from_session()) and, for
+        # a uint16 export, clip_min/clip_max already resolved too (type
+        # a value, or "Use preview slice's range" below) -- there's no
+        # whole-volume min/max to fall back to a chunk at a time.
+        self.stream_checkbox = QCheckBox("Stream to disk (low RAM)", self)
+        self.stream_checkbox.setToolTip(
+            "Reconstructs and writes one chunk of slices at a time instead of the whole "
+            "volume at once -- for a project too large to fit in RAM as a single "
+            "reconstruction. For a uint16 export, set Clip min/max explicitly first "
+            "(typed, or 'Use preview slice's range' below) -- there's no whole-volume "
+            "min/max to discover a chunk at a time."
+        )
+        self.stream_checkbox.toggled.connect(self.changed)
+
         # Only meaningful once dtype == "uint16" -- to_uint16() clips to
         # [clip_min, clip_max] then rescales that range to the full
         # uint16 span; disabled otherwise (float32 export has no
@@ -391,6 +409,7 @@ class SaveSettingsTab(QWidget):
         form = QFormLayout()
         form.addRow("Output dtype", self.dtype_combo)
         form.addRow("Export format", self.format_combo)
+        form.addRow("", self.stream_checkbox)
         form.addRow("Clip min", self.clip_min_spin)
         form.addRow("Clip max", self.clip_max_spin)
         form.addRow("", self.use_preview_range_btn)
@@ -430,6 +449,7 @@ class SaveSettingsTab(QWidget):
         self,
         dtype: str,
         export_format: str,
+        stream: bool,
         clip_min: Optional[float],
         clip_max: Optional[float],
         rows_from: int,
@@ -442,6 +462,7 @@ class SaveSettingsTab(QWidget):
         self._silently(self.dtype_combo, lambda: self.dtype_combo.setCurrentText(dtype))
         self._on_dtype_changed(dtype)  # setCurrentText above was silent, so the enabled-state slot never fired
         self._silently(self.format_combo, lambda: self.format_combo.setCurrentText(export_format))
+        self._silently(self.stream_checkbox, lambda: self.stream_checkbox.setChecked(stream))
         self._silently(self.clip_min_spin, lambda: self.clip_min_spin.setValue(clip_min if clip_min is not None else 0.0))
         self._silently(self.clip_max_spin, lambda: self.clip_max_spin.setValue(clip_max if clip_max is not None else 0.0))
 
@@ -471,8 +492,8 @@ class SaveSettingsTab(QWidget):
         for spin in self._crop_spins:
             spin.setEnabled(checked)
 
-    def values(self) -> tuple[str, str]:
-        return self.dtype_combo.currentText(), self.format_combo.currentText()
+    def values(self) -> tuple[str, str, bool]:
+        return self.dtype_combo.currentText(), self.format_combo.currentText(), self.stream_checkbox.isChecked()
 
     @staticmethod
     def _silently(widget, fn) -> None:
@@ -644,6 +665,7 @@ class AdjustmentPanel(QWidget):
         self.save_tab.set_values(
             dtype=config.dtype,
             export_format=config.export_format,
+            stream=config.stream,
             clip_min=config.dtype_clip_min,
             clip_max=config.dtype_clip_max,
             rows_from=rows_from,
@@ -706,9 +728,10 @@ class AdjustmentPanel(QWidget):
     def _on_save_settings_changed(self) -> None:
         if self.session is None:
             return
-        dtype, export_format = self.save_tab.values()
+        dtype, export_format, stream = self.save_tab.values()
         self.session.config.dtype = dtype
         self.session.config.export_format = export_format
+        self.session.config.stream = stream
 
     def _on_clip_min_changed(self, value: float) -> None:
         if self.session is not None:

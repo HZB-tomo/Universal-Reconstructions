@@ -26,8 +26,9 @@ from data_import.errors import AmbiguousVendorMatchError, NoVendorMatchError, Pr
 from data_import.importer import DataImporter
 from data_import.plugin import get_plugin
 from preprocessing import build_reference, normalize_rows, process_volume, remove_ring_artifacts, remove_zinger
-from reconstruction import Geometry, reconstruct, save_volume, to_uint16
+from reconstruction import Geometry, StreamingVolumeWriter, reconstruct, save_volume, to_uint16
 
+from orchestration import ram_check
 from orchestration.config import PipelineStageError, ProjectConfig
 
 
@@ -209,11 +210,14 @@ class PipelineRun:
         try:
             self.import_data()
             self.complete()
-            self.preprocess()
-            self.calibrate()
-            self.reconstruct()
-            self.postprocess()
-            path = self.export()
+            if self.config.stream:
+                path = self._run_streaming()
+            else:
+                self.preprocess()
+                self.calibrate()
+                self.reconstruct()
+                self.postprocess()
+                path = self.export()
             return PipelineResult(
                 project_id=self.project_id, config=self.config, success=True,
                 volume_path=path, log=list(self.log),
@@ -223,6 +227,195 @@ class PipelineRun:
                 project_id=self.project_id, config=self.config, success=False,
                 error=e, log=list(self.log),
             )
+
+    # -- streaming (chunk-at-a-time) reconstruction --------------------------
+
+    def _run_streaming(self) -> str:
+        """
+        The streaming counterpart to preprocess()+calibrate()+
+        reconstruct()+postprocess()+export(): reconstructs and writes
+        one chunk of consecutive rows (slices) at a time, via
+        StreamingVolumeWriter, so only one chunk's raw/normalized/
+        reconstructed data is ever in memory -- never the whole
+        project's volume. Every registered reconstruction backend
+        already parallelizes across the slices *within* one chunk
+        internally (see reconstruction/backends/ -- algotom's own
+        joblib/GPU-batched implementations), so the chunk itself is
+        the unit of both memory bounding and parallelism; see
+        orchestration.ram_check.estimate_chunk_rows().
+
+        Two things must already be resolved before this can run, and
+        this raises PipelineStageError rather than silently falling
+        back to the eager path's own auto-find behavior, which would
+        require loading the whole raw projection stack once anyway --
+        exactly what streaming exists to avoid:
+
+        - `config.center`: there's no safe default (an arbitrary
+          center would corrupt every reconstructed slice), and the GUI
+          already resolves this automatically (image center) the
+          moment a project is opened, before any button is clicked --
+          see AdjustmentPanel._refresh_from_session(). A bare
+          ProjectConfig used directly (CLI/scripting) needs `center`
+          set explicitly for streaming.
+        - `config.dtype_clip_min`/`dtype_clip_max`, only if
+          `dtype == "uint16"`: to_uint16() would otherwise default to
+          the whole volume's own min/max, which isn't knowable until
+          every chunk has been seen.
+
+        `config.tilt_deg` is the one exception: if still None, this
+        treats it as 0.0 (no tilt) rather than raising -- the same
+        convention the GUI's own tilt display already uses (Basic
+        settings shows 0.0 until Find Tilt has actually run), and a
+        real, common, zero-cost default (unlike center, an assumed
+        tilt of 0 doesn't corrupt anything if a project genuinely has
+        none), not a discovery step.
+        """
+        if self.config.center is None:
+            raise PipelineStageError(
+                "calibrate",
+                "streaming mode requires config.center to already be resolved (not None) -- "
+                "an arbitrary default would corrupt every reconstructed slice, and auto-finding "
+                "it here would mean loading the whole raw projection stack once, which is exactly "
+                "what streaming exists to avoid. Run/find it first, or set it directly.",
+            )
+        if self.config.dtype == "uint16" and (self.config.dtype_clip_min is None or self.config.dtype_clip_max is None):
+            raise PipelineStageError(
+                "postprocess",
+                "streaming mode needs dtype_clip_min and dtype_clip_max set explicitly for a uint16 "
+                "export -- there's no whole-volume min/max to fall back to a chunk at a time, unlike "
+                "the normal (eager) path. Set both, or export as float32.",
+            )
+
+        center = self.config.center
+        tilt_deg = self.config.tilt_deg if self.config.tilt_deg is not None else 0.0
+
+        di = DataInterface(self.project)
+        _, n_rows, width = di.shape_of("projections")
+
+        rows_slice = self.config.rows if self.config.rows is not None else slice(0, n_rows)
+        rows_start, rows_stop, _ = rows_slice.indices(n_rows)
+        total_rows = rows_stop - rows_start
+        if total_rows <= 0:
+            raise PipelineStageError("preprocess", f"config.rows={self.config.rows!r} selects no rows")
+        # Relative to [rows_start, rows_stop), the same range calibrate()
+        # would compute reference_row/centers_for_rows() against in the
+        # eager path (self.normalized.shape[1] there is this same,
+        # config.rows-restricted count) -- matched exactly here so
+        # streaming and eager reconstruct identical values for the same
+        # config, not just "close".
+        reference_row = (total_rows - 1) / 2.0
+
+        # crop's z-range is, like the eager path's postprocess()
+        # (self.volume[z0:z1, ...]), relative to this same
+        # config.rows-restricted range, not absolute detector rows --
+        # applied here as a WRITE filter (skip writing rows outside it)
+        # rather than a narrower read range, so the reference_row/
+        # centers_for_rows() math above -- and therefore the actual
+        # reconstructed values -- stays identical to the eager path
+        # regardless of whether a crop is set. y/x crop, having nothing
+        # to do with which rows exist, applies straightforwardly to
+        # every chunk.
+        if self.config.crop is not None:
+            (z0, z1), (y0, y1), (x0, x1) = self.config.crop
+            crop_yx: Optional[tuple] = (y0, y1, x0, x1)
+            out_height, out_width = y1 - y0, x1 - x0
+        else:
+            z0, z1 = 0, total_rows
+            crop_yx = None
+            out_height, out_width = width, width
+        out_total_rows = z1 - z0
+        if out_total_rows <= 0:
+            raise PipelineStageError("postprocess", f"config.crop={self.config.crop!r} selects no rows")
+
+        self.reference = build_reference(
+            self.project, reducer=self.config.reference_reducer, dark_offset=self.config.dark_offset,
+        )
+        geometry = Geometry(
+            geometry_type=di.get_metadata("geometry_type"),
+            source_to_detector_distance=di.get_metadata("source_to_detector_distance"),
+            source_to_object_distance=di.get_metadata("source_to_object_distance"),
+            detector_pixel_size=di.get_metadata("detector_pixel_size"),
+        )
+        angles = di.get_metadata("angles")
+
+        self.project.metadata.set_computed("center_of_rotation", center)
+        self.project.metadata.set_computed("tilt_angle", tilt_deg)
+        self.settings.update({
+            "center": center, "tilt_deg": tilt_deg, "calibration_backend": self.config.calibration_backend,
+            "backend": self.config.reconstruction_backend,
+        })
+        if self.config.dtype == "uint16":
+            self.settings["dtype_clip"] = {
+                "clip_min": self.config.dtype_clip_min, "clip_max": self.config.dtype_clip_max,
+                "source_dtype": "float32",
+            }
+        if self.config.crop is not None:
+            self.settings["crop"] = self.config.crop
+
+        chunk_rows = self.config.stream_chunk_rows or ram_check.estimate_chunk_rows(width, total_rows)
+
+        template = self.config.export_path or self._default_export_path_template()
+        path = self._resolve_export_path(template)
+        export_settings = {
+            **self.project.export_metadata(),
+            **self.settings,
+            **self.config.export_extra_settings,
+        }
+        out_dtype = np.uint16 if self.config.dtype == "uint16" else np.float32
+
+        writer = StreamingVolumeWriter(
+            path, format=self.config.export_format, total_slices=out_total_rows,
+            height=out_height, width=out_width, dtype=out_dtype,
+            dataset_path=self.config.export_dataset_path, settings=export_settings,
+        )
+        try:
+            for chunk_start in range(rows_start, rows_stop, chunk_rows):
+                chunk_stop = min(chunk_start + chunk_rows, rows_stop)
+                rel_start, rel_stop = chunk_start - rows_start, chunk_stop - rows_start
+
+                write_start, write_stop = max(rel_start, z0), min(rel_stop, z1)
+                if write_start >= write_stop:
+                    continue  # this whole chunk falls outside config.crop's z-range
+
+                chunk = normalize_rows(self.project, slice(chunk_start, chunk_stop), self.reference)
+                if self.config.zinger_removal:
+                    chunk = process_volume(
+                        chunk, remove_zinger,
+                        self.config.zinger_threshold if self.config.zinger_threshold is not None else 0.08,
+                        size=self.config.zinger_size if self.config.zinger_size is not None else 2,
+                    )
+                if self.config.ring_correction:
+                    chunk = process_volume(
+                        chunk, remove_ring_artifacts,
+                        method=self.config.ring_method, **self.config.ring_options,
+                    )
+
+                chunk_centers = center if tilt_deg == 0.0 else centers_for_rows(
+                    tilt_deg, center, reference_row, np.arange(rel_start, rel_stop),
+                )
+                chunk_volume = reconstruct(
+                    chunk, angles, chunk_centers, geometry=geometry,
+                    backend=self.config.reconstruction_backend, device=self.config.device,
+                    **self.config.reconstruction_options,
+                )
+
+                if self.config.dtype == "uint16":
+                    chunk_volume, _ = to_uint16(chunk_volume, self.config.dtype_clip_min, self.config.dtype_clip_max)
+                if crop_yx is not None:
+                    chunk_volume = chunk_volume[:, y0:y1, x0:x1]
+
+                # Trim to just the part of this chunk config.crop's
+                # z-range actually keeps, then place it at that range's
+                # own 0-based offset -- see the docstring above.
+                chunk_volume = chunk_volume[write_start - rel_start:write_stop - rel_start]
+                writer.write_chunk(chunk_volume, z_offset=write_start - z0)
+                self._log(f"streamed rows {chunk_start}:{chunk_stop} ({chunk_stop - chunk_start} slices)")
+        finally:
+            writer.close()
+
+        self.settings["export_path"] = path
+        self._log(f"streamed {out_total_rows} rows to {path} in chunks of up to {chunk_rows}")
+        return path
 
     # -- export path resolution --------------------------------------------
 

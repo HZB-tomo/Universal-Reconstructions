@@ -371,6 +371,11 @@ export time rather than storing it pre-translated matters for the RAM
 check specifically: it can now estimate against the *restricted* row
 count instead of the full volume's.
 
+**Stream to disk (low RAM)**: `session.config.stream`, straight on
+`ProjectConfig` like `dtype`/`export_format` (not GUI-only) -- see the
+top-level "Streaming" section below for what it actually does and what
+it requires.
+
 **Clip min/max**: enabled only when `dtype == "uint16"` --
 `to_uint16()` has no clipping step at all for `float32`. "Use preview
 slice's range" copies the last single-slice preview's own actual
@@ -469,29 +474,59 @@ same point it already computes `n_rows`/`width` for the RAM check --
 which is exactly why the RAM estimate uses the *restricted* row count
 when a range is set, not the full volume's.
 
-A project still importing, or a project whose reconstructed volume is
-estimated not to fit in available RAM (see `gui/ram_check.py`), is
-skipped before the batch starts, reported in the status bar, and not
-passed to `run_batch()`.
+A project still importing is skipped before the batch starts, reported
+in the status bar, and not passed to `run_batch()`. So is a project
+whose reconstructed volume is estimated not to fit in available RAM
+(see "RAM check" below) -- *unless* Save settings' "Stream to disk"
+is checked for it, in which case the whole-volume RAM estimate doesn't
+apply at all; see "Streaming" below.
 
 ## RAM check
 
-`reconstruct()`/`postprocess()`/`export()` all take and return a full
-in-memory array; nothing streams a reconstruction to disk slice by
-slice, so the whole output volume has to fit in RAM regardless of
-whether it's headed for the viewer (Reconstruct all slices) or a file
-(Reconstruct selected). `gui/ram_check.py`'s
-`estimate_volume_bytes(n_rows, width)` assumes a square `(width,
-width)` output slice (true for `algotom_fbp`, the only registered
-backend) at float32, times `SAFETY_FACTOR` (2.5, a margin for backend
-buffers and a dtype-conversion in `postprocess()` briefly holding both
-the old and new array, not a measured figure) against
+`AdjustmentPanel`'s own two reconstruct buttons (preview only, never
+export) and `_reconstruct_selected()`'s normal, non-streaming path both
+go through `reconstruct()`/`postprocess()`/`export()`, which take and
+return a full in-memory array -- so the whole output volume has to fit
+in RAM. `orchestration/ram_check.py`'s `estimate_volume_bytes(n_rows,
+width)` assumes a square `(width, width)` output slice (true for every
+registered backend) at float32, times `SAFETY_FACTOR` (2.5, a margin
+for backend buffers and a dtype-conversion in `postprocess()` briefly
+holding both the old and new array, not a measured figure) against
 `psutil.virtual_memory().available`. Under that, the reconstruction is
-refused before it starts rather than left to hang or thrash.
+refused before it starts rather than left to hang or thrash. This
+check is skipped entirely for a session with "Stream to disk" checked
+-- see "Streaming" below.
 
-Streaming a reconstruction to disk without holding the full volume in
-RAM would remove the need for this check for large projects, but isn't
-built (would need `reconstruction/`'s API to change, not just `gui/`).
+## Streaming
+
+Save settings' "Stream to disk (low RAM)" checkbox
+(`SaveSettingsTab.stream_checkbox`, writing straight into
+`session.config.stream` via the same `changed` signal `dtype_combo`/
+`format_combo` already use) switches `_reconstruct_selected()`'s
+`run_batch()` call over to `PipelineRun._run_streaming()`
+(`orchestration/pipeline.py`) for that project: it reconstructs and
+writes one chunk of rows (slices) at a time -- sized by
+`orchestration/ram_check.py`'s `estimate_chunk_rows()`, or
+`stream_chunk_rows` if set explicitly -- so only one chunk's raw/
+normalized/reconstructed data is ever in memory, never the whole
+volume. This is the same `run_all()`/`run_batch()` every other caller
+(the CLI's `tomo run`/`tomo batch`) already goes through, so the GUI
+needed no reconstruction-loop code of its own, just this one checkbox.
+
+Streaming needs `config.center` already resolved -- always true here,
+since `_refresh_from_session()` already defaults it to the image
+center the moment a project is opened, before any button is clicked --
+and, for a uint16 export, `dtype_clip_min`/`dtype_clip_max` set
+explicitly (typed, or "Use preview slice's range"): there's no
+whole-volume min/max to discover a chunk at a time. Both are enforced
+by `_run_streaming()` itself, raising a clear `PipelineStageError`
+rather than silently falling back to loading the whole raw stack once
+to auto-calibrate -- exactly what streaming exists to avoid. See
+`_run_streaming()`'s own docstring, and doc/RECONSTRUCTION.md's
+"Streaming" section, for the full contract (including how a crop's
+z-range and a tilted, per-row center are handled a chunk at a time
+without changing the reconstructed values from what the non-streaming
+path would produce).
 
 ## Viewer
 
@@ -544,9 +579,6 @@ avoid.
 
 - Copy-settings-between-projects, the checkbox's second consumer
   (alongside Reconstruct selected).
-- Streaming a reconstruction to disk slice by slice, so a volume
-  larger than available RAM can still be reconstructed. Currently
-  refused outright by the RAM check above rather than attempted.
 - Dock layout persistence.
 - Crop/clip/rotation controls, and any viewer-driven ROI control (crop
   box, line profile) -- the pixel-value readout is built (see Viewer,

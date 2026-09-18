@@ -72,6 +72,17 @@ class ProjectConfig:
     export_dataset_path: str = "/volume"
     export_extra_settings: dict = field(default_factory=dict)
 
+    # Reconstruct and write one chunk of rows (slices) at a time
+    # instead of holding the whole volume in RAM at once -- see
+    # PipelineRun._run_streaming(). Requires center/tilt already
+    # resolved (not None), and, for a uint16 export, dtype_clip_min/max
+    # already resolved too -- there's no whole-volume min/max to
+    # default to a chunk at a time. None = size chunks automatically
+    # (orchestration.ram_check.estimate_chunk_rows()); a positive int
+    # overrides that.
+    stream: bool = False
+    stream_chunk_rows: Optional[int] = None
+
     def resolved_project_id(self) -> str:
         """project_id if set, else the stem of `path` (the data file's
         or folder's own name, which usually already identifies the

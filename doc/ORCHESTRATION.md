@@ -35,6 +35,7 @@ result = PipelineRun(config).run_all()
 | `reconstruction_backend`, `device`, `reconstruction_options` | Reconstruction. `geometry_type` and the cone-beam/pixel-size fields are **not** here -- they come from `project.metadata`, already resolved by completion; see "Why geometry isn't a config field" below. |
 | `crop`, `dtype`, `dtype_clip_min`, `dtype_clip_max` | Postprocessing. `dtype="uint16"` runs `reconstruction.to_uint16()`. |
 | `export_format`, `export_path`, `export_dataset_path`, `export_extra_settings` | Export. `export_path` may be a template; see "Export path templates" below. |
+| `stream`, `stream_chunk_rows` | `stream=True` reconstructs and writes one chunk of rows at a time instead of the whole volume, so a project too large for RAM as a single reconstruction can still be run -- needs `center`/`tilt_deg` (and, for `dtype="uint16"`, the clip fields above) already resolved. `stream_chunk_rows=None` sizes chunks automatically. See doc/RECONSTRUCTION.md's "Streaming" section. |
 
 `ring_options` and `reconstruction_options` are open dicts for
 backend-specific keyword arguments, reachable only by building/editing

@@ -120,6 +120,8 @@ FIELD_SPECS: dict[str, dict[str, tuple]] = {
         "format": ("export_format", _literal("tiff", "hdf5")),
         "path": ("export_path", str),
         "dataset_path": ("export_dataset_path", str),
+        "stream": ("stream", _parse_bool),
+        "stream_chunk_rows": ("stream_chunk_rows", int),
     },
 }
 
@@ -265,6 +267,9 @@ dtype = float32
 [export]
 format = hdf5
 path = {project_id}_volume.h5
+# stream = true          # chunk by chunk instead of the whole volume at once;
+#                           needs center/tilt (and, for uint16, dtype_clip_min/max) already resolved, not blank
+# stream_chunk_rows =     # blank = size automatically from available RAM/cores
 """
 
 _BATCH_TEMPLATE = """\

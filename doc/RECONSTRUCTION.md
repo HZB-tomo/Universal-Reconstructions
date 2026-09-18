@@ -209,6 +209,87 @@ Neither format records units on its own; carry that through `settings`
 too if this volume will outlive the session that made it. See "Units"
 above for what a volume's raw values mean.
 
+`StreamingVolumeWriter` is `save_volume()`'s incremental counterpart --
+see "Streaming" below.
+
+## Streaming
+
+`reconstruct()`/`to_uint16()`/`save_volume()` above all take and
+return one full in-memory array -- fine for a project that fits in
+RAM, but that's a hard ceiling on how large a project this pipeline
+can reconstruct at all. `ProjectConfig.stream=True` switches
+`PipelineRun.run_all()` over to `PipelineRun._run_streaming()`
+(`orchestration/pipeline.py`) instead of the normal
+`preprocess()`→`calibrate()`→`reconstruct()`→`postprocess()`→`export()`
+chain: it reconstructs and writes one chunk of consecutive rows
+(slices) at a time, via `StreamingVolumeWriter`
+(`reconstruction/export.py`), so only one chunk's raw/normalized/
+reconstructed data is ever in memory -- never the whole volume. Every
+caller that already goes through `run_all()` -- `tomo run`, `tomo
+batch`/`run_batch()`, and the GUI's "Reconstruct selected" (its
+"Stream to disk" checkbox just sets this same field) -- gets this for
+free, with no code of its own.
+
+```python
+config = ProjectConfig(
+    path="scan.h5", format="hdf5", storage_mode="disk",
+    center=128.0, tilt_deg=0.0,               # must already be resolved -- see below
+    stream=True, stream_chunk_rows=None,       # None = size automatically
+    export_format="hdf5", export_path="out/volume.h5",
+)
+result = PipelineRun(config).run_all()
+```
+
+Chunk size: `stream_chunk_rows`, or, if left `None`,
+`orchestration.ram_check.estimate_chunk_rows(width, max_rows)` --
+sized to keep every CPU core busy in one `reconstruct()` call (every
+registered backend already parallelizes across the slices *within*
+one call internally -- algotom's own joblib/GPU-batched
+implementations, confirmed by reading their source, not assumed --
+so a chunk of 1 row wastes that), unless that many rows wouldn't fit
+in available RAM or there simply aren't that many left, in which case
+RAM/the remaining row count wins.
+
+Two things must already be resolved before streaming can run --
+`_run_streaming()` raises a clear `PipelineStageError` otherwise
+rather than silently falling back to the eager path's own auto-find,
+which would mean loading the whole raw projection stack once anyway,
+exactly what streaming exists to avoid:
+
+- `center`: no safe default exists (an arbitrary value would corrupt
+  every reconstructed slice). Resolve it first (interactively, or set
+  it directly).
+- `dtype_clip_min`/`dtype_clip_max`, only if `dtype == "uint16"`:
+  `to_uint16()` would otherwise default to the whole volume's own
+  min/max, not knowable until every chunk has been seen. Set both
+  explicitly, or export as `float32`.
+
+`tilt_deg` is the one exception: left `None`, it's treated as `0.0`
+(no tilt) rather than raising -- a real, zero-cost default (unlike
+`center`), not a discovery step.
+
+Chunks may be written in any order, and `StreamingVolumeWriter` relies
+on that rather than working around it: for `format="hdf5"`, the
+dataset is pre-allocated at its final `(total_slices, height, width)`
+shape upfront, so writing is by absolute index
+(`dataset[z0:z1] = chunk`) -- exactly as correct out of order as in
+order, since HDF5 is randomly addressable, not a stream/log. For
+`format="tiff"`, each slice's filename (`slice_00042.tif`) already
+carries its own absolute index. `_run_streaming()` happens to write
+chunks in increasing order, but nothing depends on that.
+
+A crop's z-range (`config.crop`'s first tuple) is applied as a write
+filter -- chunks (and the reference/center/tilt math) still cover
+`config.rows`' full range, exactly like the non-streaming path
+(`postprocess()` crops *after* reconstructing that same full range),
+so the reconstructed values come out identical either way; only which
+rows actually get *written* differs. A per-row center, for a nonzero
+tilt, is computed the same way per chunk (`centers_for_rows()`, using
+row positions relative to `config.rows`' own range) that the eager
+path's `calibrate()` computes it for the whole range at once -- again
+so streaming and non-streaming reconstruct identical values for the
+same config, not just similar ones.
+
 ## Writing a backend
 
 ```python
