@@ -54,6 +54,17 @@ class DataInterface:
         """Read a metadata value (e.g. get_metadata("voxel_size"))."""
         return self.project.metadata.get(key, default)
 
+    def get_metadata_source(self, key: str) -> Optional[str]:
+        """Where a metadata value came from -- "file", "user",
+        "computed", "default", "derived", or None if the field was
+        never set at all. See core/metadata.py's Source. "default"
+        specifically means completion's automatic fallback ran, not a
+        real value from the file or the user -- e.g. voxel_size
+        silently defaulting to 1.0 when a vendor plugin never reported
+        a real pixel size."""
+        field = self.project.metadata.get_field(key)
+        return field.source if field is not None else None
+
     def set_computed(self, key: str, value: Any):
         """Record a freshly computed metadata value. Forwards to
         MetadataBundle.set_computed()."""

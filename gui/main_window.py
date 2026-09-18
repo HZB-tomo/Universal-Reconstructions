@@ -38,12 +38,19 @@ class MainWindow(QMainWindow):
         self.project_panel = ProjectPanel(self)
         self.adjustment_panel = AdjustmentPanel(self.viewer, self)
 
+        # Not closable -- there's no way back in once closed (no View
+        # menu/toolbar toggle exists), so a user who closes one by
+        # accident would be stuck. Still movable/floatable.
+        _not_closable = QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
+
         left_dock = QDockWidget("Projects", self)
         left_dock.setWidget(self.project_panel)
+        left_dock.setFeatures(_not_closable)
         self.addDockWidget(Qt.LeftDockWidgetArea, left_dock)
 
         right_dock = QDockWidget("Adjustment", self)
         right_dock.setWidget(self.adjustment_panel)
+        right_dock.setFeatures(_not_closable)
         self.addDockWidget(Qt.RightDockWidgetArea, right_dock)
 
         self.project_panel.project_opened.connect(self._open_project)
@@ -194,7 +201,28 @@ class MainWindow(QMainWindow):
                 skipped.append(f"{session.project_id}: still importing")
                 continue
             _, n_rows, width = DataInterface(session.run.project).shape_of("projections")
-            required = ram_check.estimate_volume_bytes(n_rows, width)
+
+            # Save settings' from/to slice range and crop box are GUI-only
+            # (ProjectSession.export_rows/export_crop_yx) until this exact
+            # moment -- translated into config.rows/config.crop only here,
+            # right before the one action that actually exports, so the
+            # RAM estimate below reflects the real output size rather than
+            # the full volume's.
+            if session.export_rows is not None and session.export_rows != (0, n_rows - 1):
+                start, end = session.export_rows
+                start, end = max(0, start), min(n_rows - 1, end)
+                session.config.rows = slice(start, end + 1)
+                effective_n_rows = max(end - start + 1, 0)
+            else:
+                session.config.rows = None
+                effective_n_rows = n_rows
+            session.config.crop = (
+                ((0, effective_n_rows), session.export_crop_yx[0:2], session.export_crop_yx[2:4])
+                if session.export_crop_yx is not None
+                else None
+            )
+
+            required = ram_check.estimate_volume_bytes(effective_n_rows, width)
             if not ram_check.fits_in_available_ram(required):
                 skipped.append(f"{session.project_id}: needs roughly {ram_check.describe(required)}, not enough RAM available")
                 continue

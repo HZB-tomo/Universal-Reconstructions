@@ -15,6 +15,8 @@ import numpy as np
 
 from reconstruction.backend import Geometry, ReconstructionBackend, get_backend
 
+_UM_PER_CM = 1.0e4
+
 
 def reconstruct(
     sinogram: np.ndarray,
@@ -48,11 +50,13 @@ def reconstruct(
 
     Units: a backend returns raw attenuation coefficients in "per
     pixel" units. If `geometry.detector_pixel_size` is set (stored in
-    micrometers, see Geometry), the result is divided by it and
-    returned as attenuation in inverse micrometers (1/um). If
-    `detector_pixel_size` is None, the result stays in "per pixel"
-    units (1/px), not physically comparable across datasets with
-    different pixel sizes. See doc/RECONSTRUCTION.md's "Units" section.
+    micrometers, see Geometry), the result is divided by it and scaled
+    to inverse centimeters (1/cm) -- the conventional unit for a linear
+    attenuation coefficient, not inverse micrometers, which is what
+    dividing by a micrometer-scale pixel size gives directly (see
+    _UM_PER_CM). If `detector_pixel_size` is None, the result stays in
+    "per pixel" units (1/px), not physically comparable across datasets
+    with different pixel sizes. See doc/RECONSTRUCTION.md's "Units" section.
 
     The returned array is always float32, regardless of what the
     backend returns internally.
@@ -72,7 +76,19 @@ def reconstruct(
     images = backend_instance.reconstruct(stack, np.asarray(angles), center, geometry, device, **options)
 
     if geometry.detector_pixel_size is not None:
-        images = images / np.float32(geometry.detector_pixel_size)
+        images = images / np.float32(geometry.detector_pixel_size) * np.float32(_UM_PER_CM)
     images = np.asarray(images, dtype=np.float32)
 
     return images[0] if was_single else images
+
+
+def resolve_device(backend: Union[str, ReconstructionBackend], device: Optional[str] = None) -> str:
+    """
+    "gpu" or "cpu": the device a reconstruct() call with this same
+    `backend`/`device` will actually use, accounting for real hardware
+    availability -- not just the `device` hint, which for most backends
+    defaults to "try GPU, fall back to CPU" and so doesn't say what
+    actually happened on its own. See ReconstructionBackend.actual_device().
+    """
+    backend_instance = get_backend(backend) if isinstance(backend, str) else backend
+    return backend_instance.actual_device(device)

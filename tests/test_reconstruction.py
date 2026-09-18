@@ -8,6 +8,8 @@ Dispatch tests use a hand-written recording backend passed directly as
 `backend=` (reconstruct() accepts an instance, not just a name), so they
 don't touch the global registry or require algotom at all.
 """
+import importlib.util
+
 import numpy as np
 import pytest
 
@@ -138,8 +140,9 @@ def test_reconstruct_divides_by_pixel_size_to_get_real_attenuation_units():
 
     image = reconstruct(sinogram, angles, center=4.0, geometry=geometry, backend=backend)
 
-    # 2.0 (1/px) / 4.0 (um/px) = 0.5 (1/um) -- see doc/RECONSTRUCTION.md's "Units" section
-    assert np.allclose(image, 0.5)
+    # 2.0 (1/px) / 4.0 (um/px) = 0.5 (1/um) * 1e4 (um/cm) = 5000.0 (1/cm)
+    # -- see doc/RECONSTRUCTION.md's "Units" section
+    assert np.allclose(image, 5000.0)
 
 
 def test_reconstruct_always_returns_float32_regardless_of_backend_dtype():
@@ -151,7 +154,7 @@ def test_reconstruct_always_returns_float32_regardless_of_backend_dtype():
     image = reconstruct(sinogram, angles, center=4.0, geometry=geometry, backend=backend)
 
     assert image.dtype == np.float32
-    assert np.allclose(image, 0.5)
+    assert np.allclose(image, 5000.0)
 
 
 def test_reconstruct_rejects_unsupported_geometry():
@@ -169,7 +172,32 @@ def test_reconstruct_rejects_unsupported_geometry():
         reconstruct(sinogram, angles, center=4.0, geometry=_geometry("cone"), backend=_ParallelOnly())
 
 
+def test_resolve_device_defaults_to_cpu_for_a_backend_with_no_gpu_path():
+    from reconstruction import resolve_device
+
+    assert resolve_device(_RecordingBackend()) == "cpu"
+    assert resolve_device(_RecordingBackend(), device="gpu") == "cpu"  # still cpu -- no override, no GPU path exists
+
+
 algotom = pytest.importorskip("algotom", reason="algotom not installed -- algotom_fbp backend is optional")
+
+
+def test_algotom_fbp_actual_device_matches_real_cuda_availability():
+    """
+    Not a guess: matches numba.cuda.is_available() exactly, since
+    that's the same check fbp_reconstruction() itself makes internally
+    -- see algotom_fbp.py's actual_device(). This machine has no GPU,
+    so both the None (auto) and explicit "gpu" hints should report
+    "cpu", matching what fbp_reconstruction() actually falls back to.
+    """
+    from numba import cuda
+
+    from reconstruction import resolve_device
+
+    expected = "gpu" if cuda.is_available() else "cpu"
+    assert resolve_device("algotom_fbp") == expected
+    assert resolve_device("algotom_fbp", device="gpu") == expected
+    assert resolve_device("algotom_fbp", device="cpu") == "cpu"  # explicit cpu never reports gpu, regardless of hardware
 
 
 def test_algotom_fbp_reconstructs_a_recognizable_slice():
@@ -211,6 +239,128 @@ def test_algotom_fbp_reconstructs_a_recognizable_slice():
     # filtered backprojection at moderate resolution) -- this is a floor
     # confirming the pipeline is actually working, not a target for "perfect".
     assert correlation > 0.7
+
+
+_needs_astra = pytest.mark.skipif(
+    importlib.util.find_spec("astra") is None,
+    reason="astra-toolbox not installed -- algotom_bp/sirt/sart/art/cgls wrap algotom's astra_reconstruction()",
+)
+
+
+@pytest.mark.parametrize(
+    "backend_name, options, min_correlation",
+    [
+        ("algotom_bpf", {}, 0.7),
+        ("algotom_dfi", {}, 0.6),
+        pytest.param("algotom_bp", {}, 0.4, marks=_needs_astra),  # unfiltered backprojection -- inherently blurry, no ringing to fight
+        pytest.param("algotom_sirt", {"num_iter": 50}, 0.7, marks=_needs_astra),
+        pytest.param("algotom_sart", {"num_iter": 50}, 0.45, marks=_needs_astra),
+        pytest.param("algotom_cgls", {"num_iter": 50}, 0.7, marks=_needs_astra),
+    ],
+)
+def test_algotom_backend_reconstructs_a_recognizable_slice(backend_name, options, min_correlation):
+    """
+    Same real end-to-end check as test_algotom_fbp_reconstructs_a_recognizable_slice,
+    across every other algotom-based backend. Thresholds are each
+    backend's own measured correlation at these settings, not a shared
+    number -- BP (no filtering) and SART (50 iterations) have a much
+    lower ceiling here than FBP/SIRT/CGLS, which isn't a bug in them,
+    just what those specific algorithms/settings produce.
+    """
+    from preprocessing import build_reference, normalize_rows
+    from tests.fixtures.realistic_phantom import generate, to_project_object
+
+    phantom = generate(
+        shape=(8, 64, 64), n_angles=240,
+        cor_deviation=0.0, tilt_deg=0.0,
+        n_scratches=0, n_defective_pixels=0, inhomogeneity_strength=0.0,
+        noise_level=0.0, seed=1,
+    )
+    project = to_project_object(phantom)
+    reference = build_reference(project)
+    normalized = normalize_rows(project, slice(None), reference)
+
+    row = phantom.volume.shape[0] // 2
+    sinogram = normalized[:, row, :]
+    width = sinogram.shape[1]
+
+    image = reconstruct(
+        sinogram, phantom.angles, center=width / 2, geometry=_geometry(), backend=backend_name, device="cpu", **options,
+    )
+
+    assert image.shape == (width, width)
+    correlation = np.corrcoef(image.ravel(), phantom.volume[row].ravel())[0, 1]
+    assert correlation > min_correlation
+
+
+@_needs_astra
+def test_algotom_art_needs_a_much_larger_iteration_count_than_the_other_iterative_backends():
+    """
+    ART's num_iter counts individual ray updates, not full sweeps like
+    SIRT/SART/CGLS -- confirmed directly, twice: on a 300-angle,
+    300-pixel-wide case (see algotom_astra.py's module docstring),
+    num_iter=50 reconstructs to exactly all zeros. On this smaller
+    phantom it's not literally zero, but still barely started (measured
+    correlation ~0.35) versus num_iter=n_angles*width (one full
+    sweep-equivalent, ~0.7+) -- either way, a real, large,
+    reproducible gap at the same num_iter that works fine for the
+    other three, not a one-off coincidence of one specific phantom.
+    """
+    from preprocessing import build_reference, normalize_rows
+    from tests.fixtures.realistic_phantom import generate, to_project_object
+
+    phantom = generate(
+        shape=(8, 64, 64), n_angles=240,
+        cor_deviation=0.0, tilt_deg=0.0,
+        n_scratches=0, n_defective_pixels=0, inhomogeneity_strength=0.0,
+        noise_level=0.0, seed=1,
+    )
+    project = to_project_object(phantom)
+    reference = build_reference(project)
+    normalized = normalize_rows(project, slice(None), reference)
+
+    row = phantom.volume.shape[0] // 2
+    sinogram = normalized[:, row, :]
+    width = sinogram.shape[1]
+
+    too_few = reconstruct(
+        sinogram, phantom.angles, center=width / 2, geometry=_geometry(), backend="algotom_art", device="cpu", num_iter=50,
+    )
+    correlation_too_few = np.corrcoef(too_few.ravel(), phantom.volume[row].ravel())[0, 1]
+
+    enough = reconstruct(
+        sinogram, phantom.angles, center=width / 2, geometry=_geometry(), backend="algotom_art", device="cpu",
+        num_iter=len(phantom.angles) * width,
+    )
+    correlation_enough = np.corrcoef(enough.ravel(), phantom.volume[row].ravel())[0, 1]
+
+    assert correlation_too_few < 0.5
+    assert correlation_enough > 0.65
+    assert correlation_enough - correlation_too_few > 0.25
+
+
+def test_algotom_gridrec_raises_a_clear_import_error_without_tomopy():
+    """
+    algotom_gridrec depends on TomoPy internally (algotom.rec.reconstruction.
+    gridrec_reconstruction() is a thin wrapper around tomopy's own gridrec),
+    which has no pip wheel at all -- confirmed separately. Without it
+    (never installed here, a plain pip environment), the backend should
+    raise a clear, install-instructed ImportError -- the same signal
+    every other optional-dependency backend gives, not algotom's own
+    bare ValueError.
+    """
+    try:
+        import tomopy  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        pytest.skip("tomopy is installed here -- this test is specifically about the case where it's not")
+
+    with pytest.raises(ImportError, match="tomopy"):
+        reconstruct(
+            np.zeros((5, 8)), np.linspace(0, 180, 5, endpoint=False), center=4.0,
+            geometry=_geometry(), backend="algotom_gridrec",
+        )
 
 
 def test_normalize_rows_output_feeds_reconstruct_with_no_reshaping():

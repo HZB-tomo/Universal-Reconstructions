@@ -15,17 +15,7 @@ from typing import Optional
 import numpy as np
 
 from reconstruction.backend import Geometry, ReconstructionBackend, register_backend
-
-
-def _algotom_reconstruction():
-    try:
-        import algotom.rec.reconstruction as rec
-    except ImportError as e:
-        raise ImportError(
-            "The 'algotom_fbp' reconstruction backend requires the 'algotom' package, which isn't installed. "
-            "Install it with: pip install algotom"
-        ) from e
-    return rec
+from reconstruction.backends._algotom_common import algotom_reconstruction
 
 
 @register_backend
@@ -42,7 +32,7 @@ class AlgotomFbpBackend(ReconstructionBackend):
         device: Optional[str] = None,
         **options,
     ) -> np.ndarray:
-        rec = _algotom_reconstruction()
+        rec = algotom_reconstruction(self.name)
 
         gpu = True if device is None else (device == "gpu")
 
@@ -55,3 +45,12 @@ class AlgotomFbpBackend(ReconstructionBackend):
             for i in range(n_slices)
         ]
         return np.stack(images)
+
+    def actual_device(self, device: Optional[str] = None) -> str:
+        wants_gpu = True if device is None else (device == "gpu")
+        if not wants_gpu:
+            return "cpu"
+        # Mirrors fbp_reconstruction()'s own check exactly (it's
+        # literally numba.cuda re-exported), so this reports the truth
+        # rather than a separate guess that could disagree with it.
+        return "gpu" if algotom_reconstruction(self.name).cuda.is_available() else "cpu"

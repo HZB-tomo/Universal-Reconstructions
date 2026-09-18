@@ -78,6 +78,22 @@ class ReconstructionBackend(ABC):
         `**options` are algorithm-specific and defined by each backend.
         """
 
+    def actual_device(self, device: Optional[str] = None) -> str:
+        """
+        "gpu" or "cpu": the device a reconstruct() call with this same
+        `device` hint actually ends up using, accounting for real
+        hardware availability and this backend's own fallback logic --
+        not just echoing the hint back. `device=None` (the "try GPU,
+        fall back to CPU" default most backends use) is exactly the
+        case where the hint alone doesn't tell you what happened;
+        call this to report it accurately, e.g. in a status message.
+
+        Base implementation: always "cpu" -- correct for any backend
+        with no GPU path of its own. A backend that does have one (see
+        AlgotomFbpBackend) overrides this with a real hardware check.
+        """
+        return "cpu"
+
 
 _REGISTRY: dict[str, ReconstructionBackend] = {}
 

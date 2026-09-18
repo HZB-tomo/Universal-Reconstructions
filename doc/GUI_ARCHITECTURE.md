@@ -264,6 +264,36 @@ derivation used rather than assuming `endpoint=False` and adding the
 step back in -- a real scan that does record the redundant endpoint
 would then be overcounted by one step instead.
 
+`pixel_size_spin` follows the same greyed-out-when-real pattern, but
+keyed by *source*, not presence: `voxel_size` (`core/known_fields.py`)
+has only a `"default"` strategy, never `"ask"`, so it always resolves
+to *something* -- silently defaulting to `1.0` um when no plugin
+reported a real one, never showing up in `missing_soft_fields()` at
+all. `DataInterface.get_metadata_source("voxel_size") == "file"` is
+what actually distinguishes a real value from that silent default; the
+box is disabled only in the "file" case, editable (writing into
+`completion_answers["voxel_size"]`, same mechanism as `angle_span`)
+whenever it's a default or a still-pending user answer. This exists
+purely so a defaulted pixel size is visible and fixable -- not because
+completion would otherwise get stuck, unlike `angle_span`/`geometry_type`.
+
+Backend list intentionally excludes `algotom_gridrec` even though it's
+a registered backend: it needs `tomopy`, which has no pip wheel at all
+(conda-only) -- see doc/RECONSTRUCTION.md's "Built-in backends". A
+device combo (`_DEVICE_CHOICES`: Auto/CPU/GPU, writing into
+`session.config.device`) sits next to it; `reconstruction.resolve_device()`
+reports which device a reconstruction actually used (not just the
+hint) in the status message afterward, since a backend defaulting to
+"try GPU, fall back to CPU" gives no other way to tell what happened --
+confirmed directly to matter: running on a real GPU workstation gave no
+indication either way before this existed.
+
+The reconstruct status message also always states the unit (`1/cm`)
+and, when `voxel_size`'s source isn't `"file"`, appends a caveat that
+the scale may not be accurate -- `1/cm` is only physically meaningful
+once pixel size is a real, measured value; see doc/RECONSTRUCTION.md's
+"Units" section.
+
 ### Automatic adjustments
 
 Find center of rotation: `build_reference()` +
@@ -299,15 +329,83 @@ Placeholder. Ring/zinger removal (`ProjectConfig.zinger_removal`,
 
 ### Save settings
 
-`dtype` and `export_format` only. Crop, clip, and rotation are not
-wired up: crop and clip need viewer-driven controls (a `RectROI` on a
-reconstructed slice), not typed fields, and there is no backend
-concept of a post-reconstruction rotation yet -- `tilt_deg` is
-rotation-axis tilt, corrected during calibration, not an output-image
-rotation.
+Everything here only ever affects `MainWindow._reconstruct_selected()`
+("Reconstruct selected", the one action that exports) -- Adjustment's
+own two reconstruct buttons are preview-only and never call
+`postprocess()`/export, so none of this has any effect on them. Values
+live on `session.config` (`dtype`, `dtype_clip_min/max`) as usual, but
+the slice range and crop rect live on `ProjectSession`
+(`export_rows`/`export_crop_yx`) instead, not `ProjectConfig` --
+neither means anything to orchestration on its own; both get
+translated into the config fields orchestration already understands
+(`rows`/`crop`) only at the moment `_reconstruct_selected()` actually
+runs, per checked project, right where the RAM check already computes
+`n_rows`/`width` for that project anyway. Doing this translation at
+export time rather than storing it pre-translated matters for the RAM
+check specifically: it can now estimate against the *restricted* row
+count instead of the full volume's.
 
-Nothing in this tab does anything yet; there is no `Run`/export action
-in this iteration.
+**Clip min/max**: enabled only when `dtype == "uint16"` --
+`to_uint16()` has no clipping step at all for `float32`. "Use preview
+slice's range" copies the last single-slice preview's own actual
+min/max into the two fields -- not a cosmetic shortcut: a batch
+export's volume is built and exported entirely inside `run_batch()`,
+never materialized in the GUI process at all, so there is no other
+cheap way to estimate sensible clip bounds before running a
+potentially large export. Leaving both fields alone keeps
+`to_uint16()`'s own default (the exported volume's own min/max,
+computed for real at export time).
+
+**From slice / to slice**: `session.export_rows`, BOTH INCLUSIVE
+("slices 100 to 500" means literally that) -- resolves to the full
+range the first time a session's row count becomes known, same
+"resolve once" pattern `preview_row` already uses. Converted to
+Python's half-open `slice(start, end + 1)` (or `None` for the
+unrestricted full-range case, matching existing behavior exactly) only
+inside `_reconstruct_selected()`.
+
+**Crop**: a `pg.RectROI` `ImageViewer` owns directly
+(`_crop_roi`) -- deliberately not `pg.ImageView`'s own built-in `.roi`,
+which is wired to the `roiPlot` already hidden for the frame slider and
+isn't reusable for this. Hidden by default; the checkbox shows it,
+seeding a non-degenerate 80%-of-frame default the first time a session
+turns cropping on with no stored rect yet
+(`ImageViewer.set_crop_visible()`), or restoring that session's own
+already-stored rect otherwise (`set_crop_rect()`, which -- like
+`BasicSettingsTab.set_values()`'s fields -- blocks the ROI's own
+signal so restoring doesn't get mistaken for a new user edit).
+Dragging it (`sigRegionChangeFinished`) writes `(y0, y1, x0, x1)`,
+half-open, straight into `session.export_crop_yx`; switching sessions
+syncs the box to whichever one's own rect (or hides it, if that
+session never turned cropping on) -- each project's crop is
+independent, since the ROI widget is one shared UI element reflecting
+whichever project is currently open, the same relationship `angle_span`/
+`pixel_size`/`device` already have to their own widgets.
+
+Four spin boxes mirror the box both ways, laid out as two rows --
+"Starting point" (x, y) and "End point" (x, y) -- rather than one row
+of terse `y0`/`x0`-style labels: dragging updates them
+(`set_crop_spins()`, silent, same reasoning as `set_crop_rect()`), and
+typing into them moves the box (`crop_rect_edited` ->
+`ImageViewer.set_crop_rect()`) -- useful on its own for a
+reproducible, typed-in crop, not only as a readout of a drag.
+
+`get_crop_rect()` deliberately does NOT clamp against the viewer's
+currently displayed frame's own shape, confirmed directly to be wrong:
+which frame that is (a raw, lazily-loaded projection, or a
+reconstructed preview -- different shapes) changes every time a
+project is opened or reopened, independent of the crop box's own
+position, so a rect drawn against a 300x300 reconstructed preview was
+getting silently zeroed out the moment `_open_project()` put the
+viewer back on a `(32, 300)` raw projection stack. An out-of-range
+crop is harmless regardless -- numpy slicing clips silently wherever
+`config.crop` is actually applied (`postprocess()`).
+
+Rotation is still not implemented: there is no backend concept of a
+post-reconstruction image rotation yet -- `tilt_deg` is rotation-axis
+tilt, corrected during calibration, a different thing entirely from an
+output-image rotation. Deliberately deferred; not planned for this
+iteration.
 
 ### Reconstruct scope
 
@@ -318,7 +416,7 @@ than by label, so scope is never ambiguous:
 |---|---|---|---|
 | Reconstruct (slice) | Adjustment | one project, current row | `slice(preview_row, preview_row + 1)` |
 | Reconstruct all slices | Adjustment | one project, every row | `None` |
-| Reconstruct selected | Project | every checked project | per project, exports |
+| Reconstruct selected | Project | every checked project | per project, from Save settings' `export_rows` -- see below |
 
 Both adjustment-panel actions call
 `_run_pipeline_to_reconstruction()`: `import_data()` if not already
@@ -336,6 +434,14 @@ project's failure doesn't stop the rest. Each `PipelineConfig`'s
 `<source file's directory>/<project_id>_volume.h5`, next to the data
 it came from, rather than `PipelineRun`'s own default of the current
 working directory.
+
+Before dispatching, `_reconstruct_selected()` translates each checked
+session's `export_rows`/`export_crop_yx` (Save settings, GUI-only --
+see "Save settings" above) into that session's `config.rows`/`config.crop`
+(orchestration-level, what `run_batch()` actually reads), right at the
+same point it already computes `n_rows`/`width` for the RAM check --
+which is exactly why the RAM estimate uses the *restricted* row count
+when a range is set, not the full volume's.
 
 A project still importing, or a project whose reconstructed volume is
 estimated not to fit in available RAM (see `gui/ram_check.py`), is

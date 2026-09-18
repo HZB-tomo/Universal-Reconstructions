@@ -2,8 +2,8 @@
 
 `reconstruction/` turns normalized sinograms into reconstructed images:
 one slice, several, or a whole volume, through a chosen backend, and
-writes the result to disk. One backend contract, one built-in backend
-(`algotom_fbp`, parallel-beam only).
+writes the result to disk. One backend contract, nine built-in
+backends, all parallel-beam only -- see "Built-in backends" below.
 
 `reconstruct()` takes plain arrays, not a `ProjectObject`. The caller
 prepares the sinogram, angles, center, and geometry beforehand.
@@ -23,7 +23,7 @@ The returned shape matches the input shape:
 | a single `(n_angles, width)` sinogram | a single `(height, width)` image |
 | a stack, `(n_angles, n_slices, width)` | a matching stack, `(n_slices, height, width)` |
 
-Every returned value is an attenuation coefficient in `float32`: `1/um`
+Every returned value is an attenuation coefficient in `float32`: `1/cm`
 if `geometry.detector_pixel_size` is set, `1/px` otherwise. See "Units"
 below.
 
@@ -60,18 +60,81 @@ phantom).
   honor it, ignore it, or use its own default when `None`.
 - **`**options`** -- forwarded to the backend, algorithm-specific.
 
+## Built-in backends
+
+All nine wrap `algotom`, and all are parallel-beam only. Every one
+past `algotom_fbp` was added by wrapping a function algotom already
+exposes -- none of this is a new reconstruction implementation.
+
+| Backend | Wraps | Device | Extra dependency |
+|---|---|---|---|
+| `algotom_fbp` | `fbp_reconstruction` | CPU/GPU | `algotom` (via the `preprocessing` extra) |
+| `algotom_gridrec` | `gridrec_reconstruction` | CPU only | `algotom` **and** `tomopy` (conda-only, no pip wheel -- see below) |
+| `algotom_bpf` | `bpf_reconstruction` | CPU/GPU | `algotom` |
+| `algotom_dfi` | `dfi_reconstruction` | CPU only | `algotom` |
+| `algotom_bp` | `astra_reconstruction(method="BP"/"BP_CUDA")` | CPU/GPU | `algotom` **and** `astra-toolbox` (the `reconstruction_extra` extra) |
+| `algotom_sirt` | same, `"SIRT"` | CPU/GPU | same |
+| `algotom_sart` | same, `"SART"` | CPU/GPU | same |
+| `algotom_art` | same, `"ART"` | CPU/GPU | same -- see the note below, `num_iter` behaves very differently here |
+| `algotom_cgls` | same, `"CGLS"` | CPU/GPU | same |
+
+FBP/gridrec/BPF/DFI are analytic (one pass, fast); BP/SIRT/SART/ART/CGLS
+are iterative except BP itself (slower, but handle noisy/sparse/
+limited-angle data better) -- iteration count is `num_iter` in
+`**options`, algotom's own default of `1` is almost always too few.
+
+`algotom_art` is a trap if used like the other three: ASTRA's plain
+`'ART'` counts individual ray (row) updates, not full sweeps over every
+projection the way SIRT/SART/CGLS's `num_iter` does. Confirmed directly
+(`tests/test_reconstruction.py`): the same `num_iter=50` that works
+fine for SIRT/SART/CGLS reconstructs ART to exactly zero on one test
+case and barely-started on another. Pass something on the order of
+`n_projections * width` (one full sweep-equivalent) instead. There is
+no warning from ASTRA when this is too low.
+
+`algotom_gridrec` needs `tomopy`, which `gridrec_reconstruction()`
+defers to entirely (confirmed directly: it's a thin wrapper, not an
+algotom-native implementation) -- and TomoPy has no pip wheel at all,
+conda-only (`conda install -c conda-forge tomopy`). For that reason
+it's deliberately left out of the GUI's reconstruction-algorithm list
+(see `gui/adjustment_panel.py`); it's still a registered backend,
+usable directly via the CLI/scripting API if you've set tomopy up
+yourself.
+
+`resolve_device(backend, device)` reports which device a call will
+actually use (or did use), accounting for real hardware, not just the
+`device` hint -- see `ReconstructionBackend.actual_device()`. Every
+backend but `algotom_gridrec`/`algotom_dfi` (no GPU path in algotom at
+all) checks the same `numba.cuda.is_available()` that `fbp_reconstruction()`/
+`astra_reconstruction()` use internally, so it can't disagree with what
+actually happened.
+
 ## Units
 
 - If `geometry.detector_pixel_size` is set (stored in micrometers),
-  the result is in inverse micrometers (1/um).
+  the result is in inverse centimeters (1/cm) -- the conventional unit
+  for a linear attenuation coefficient in x-ray physics, not the
+  micrometers `detector_pixel_size` itself is stored in.
 - If `detector_pixel_size` is `None`, the result is in "per pixel"
   units (1/px), not comparable across datasets with different pixel
   sizes.
 
 A backend's underlying algorithm produces `mu * pixel_size`, in "per
 pixel" units, regardless of library. `reconstruct()` divides by
-`detector_pixel_size` once, centrally, to produce `mu` in 1/um. A
-backend never needs to know about `detector_pixel_size`.
+`detector_pixel_size` (giving 1/um) then multiplies by `api._UM_PER_CM`
+(1e4, since 1 cm = 1e4 um) to give `mu` in 1/cm, once, centrally. A
+backend never needs to know about `detector_pixel_size` or this
+conversion.
+
+This unit is only physically meaningful when `detector_pixel_size`
+is a real, measured value -- not `core/known_fields.py`'s silent
+`voxel_size` default of `1.0` um for a vendor plugin that never
+reported a real pixel size (`detector_pixel_size` derives from
+`voxel_size` for parallel-beam; see `completion/derivers.py`). Check
+`DataInterface.get_metadata_source("voxel_size") == "file"` before
+trusting the 1/cm scale of a given project's result; the GUI's Basic
+settings panel does this already (see doc/GUI_ARCHITECTURE.md) and
+flags it in the reconstruct status message otherwise.
 
 `algotom.rec.reconstruction.fbp_reconstruction`'s signature has no
 pixel-size parameter (`ratio` is a circular field-of-view mask), so its

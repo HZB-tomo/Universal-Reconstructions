@@ -26,6 +26,18 @@ class ProjectSession:
     # resolves it to the middle row -- see _refresh_from_session().
     preview_row: Optional[int] = None
     error: Optional[str] = None
+    # Save settings' "from slice"/"to slice" range, BOTH INCLUSIVE
+    # (matching how a person says "slices 100 to 500"), and its crop
+    # rectangle -- (y0, y1, x0, x1), HALF-OPEN, matching Python slicing
+    # directly (this one feeds straight into config.crop with no
+    # conversion). Neither has any meaning to orchestration on its own
+    # -- MainWindow._reconstruct_selected() translates both into
+    # config.rows/config.crop right before exporting; AdjustmentPanel's
+    # own preview buttons never export and so never consult either.
+    # None means "everything"/"no crop", same as the config fields they
+    # translate into.
+    export_rows: Optional[tuple[int, int]] = None
+    export_crop_yx: Optional[tuple[int, int, int, int]] = None
 
     @property
     def project_id(self) -> str:
