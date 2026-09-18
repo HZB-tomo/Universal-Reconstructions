@@ -40,10 +40,17 @@ class ReconstructionBackend(ABC):
         supported_geometries: the Geometry.geometry_type values this
                                backend supports, e.g. {"parallel"} or
                                {"parallel", "cone"}.
+        is_iterative:         whether this backend actually uses
+                               **options["num_iter"] (SIRT/SART/ART/CGLS)
+                               -- direct-inversion backends (FBP, gridrec,
+                               BPF, DFI, plain BP) ignore it, and the GUI
+                               only shows an iteration-count control when
+                               this is True.
     """
 
     name: str
     supported_geometries: set
+    is_iterative: bool = False
 
     @abstractmethod
     def reconstruct(

@@ -279,8 +279,34 @@ completion would otherwise get stuck, unlike `angle_span`/`geometry_type`.
 
 Backend list intentionally excludes `algotom_gridrec` even though it's
 a registered backend: it needs `tomopy`, which has no pip wheel at all
-(conda-only) -- see doc/RECONSTRUCTION.md's "Built-in backends". A
-device combo (`_DEVICE_CHOICES`: Auto/CPU/GPU, writing into
+(conda-only) -- see doc/RECONSTRUCTION.md's "Built-in backends".
+
+An "Iterations" spin box (`num_iter_spin`, writing into
+`session.config.reconstruction_options["num_iter"]`) appears only for
+the four iterative backends -- SIRT/SART/ART/CGLS,
+`ReconstructionBackend.is_iterative` -- and is hidden for the rest,
+which ignore it. This exists because `reconstruction_options` otherwise
+stays `{}`, and algotom's own default when `num_iter` is never passed
+is `1`: a single sweep, nowhere near converged, which is exactly why an
+iterative backend can come out looking wildly different from FBP/
+gridrec/BPF/DFI (those are direct, non-iterative inversions -- always
+fully "converged" by construction) if this control didn't exist.
+`_refresh_from_session()` seeds a real value the first time an
+iterative backend is selected and `"num_iter"` isn't already set --
+`50` for SIRT/SART/CGLS, but `n_angles * width` for ART specifically,
+confirmed directly (`reconstruction/backends/algotom_astra.py`) to need
+an iteration count on that order because ASTRA's plain `ART` counts
+individual ray updates, not full sweeps, unlike the other three. Once
+set, switching backends again never silently overwrites a value the
+user (or this seeding) already put there -- only a still-unset
+`"num_iter"` gets a default, same "resolve once" rule as
+`center`/`preview_row`/`export_rows`. `_on_backend_changed()` re-runs
+`_refresh_from_session()` in full after updating
+`reconstruction_backend`, so the spin box's visibility, value, and
+tooltip (which warns specifically about ART's different iteration
+semantics) stay in sync with whatever's selected.
+
+A device combo (`_DEVICE_CHOICES`: Auto/CPU/GPU, writing into
 `session.config.device`) sits next to it; `reconstruction.resolve_device()`
 reports which device a reconstruction actually used (not just the
 hint) in the status message afterward, since a backend defaulting to

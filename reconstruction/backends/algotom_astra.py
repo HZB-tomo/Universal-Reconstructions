@@ -98,21 +98,25 @@ class AlgotomBpBackend(ReconstructionBackend):
 class AlgotomSirtBackend(AlgotomBpBackend):
     name = "algotom_sirt"
     _method_base = "SIRT"
+    is_iterative = True
 
 
 @register_backend
 class AlgotomSartBackend(AlgotomBpBackend):
     name = "algotom_sart"
     _method_base = "SART"
+    is_iterative = True
 
 
 @register_backend
 class AlgotomArtBackend(AlgotomBpBackend):
     name = "algotom_art"
     _method_base = "ART"
+    is_iterative = True
 
 
 @register_backend
 class AlgotomCglsBackend(AlgotomBpBackend):
     name = "algotom_cgls"
     _method_base = "CGLS"
+    is_iterative = True

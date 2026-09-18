@@ -32,7 +32,7 @@ from calibration import find_center, find_tilt
 from core.data_interface import DataInterface
 from orchestration import PipelineRun, load_config
 from preprocessing import build_reference, normalize_slice
-from reconstruction import resolve_device
+from reconstruction import get_backend, resolve_device
 
 from gui import ram_check
 from gui.session import ProjectSession
@@ -45,6 +45,14 @@ from gui.workers import run_in_background
 # get flagged in the status message, not rejected.
 MAX_PLAUSIBLE_COR_OFFSET_FRACTION = 0.02
 MAX_PLAUSIBLE_TILT_DEG = 1.0
+
+# Default seeded into an iterative backend's num_iter the first time one
+# is selected. Reasonable for SIRT/SART/CGLS (see tests/test_reconstruction.py);
+# ART needs num_iter on the order of n_angles*width instead -- see
+# reconstruction/backends/algotom_astra.py's module docstring -- so it
+# gets its own, much larger default (seeded once width/angles are known;
+# see _on_backend_changed()).
+_DEFAULT_NUM_ITER = 50
 
 # Display text <-> ProjectConfig.device value. None ("Auto") is what
 # every backend defaults to on its own (try GPU, fall back to CPU);
@@ -60,6 +68,7 @@ class BasicSettingsTab(QWidget):
     slice_changed = Signal(int)
     backend_changed = Signal(str)
     device_changed = Signal(object)  # None ("auto"), "cpu", or "gpu" -- see _DEVICE_CHOICES
+    num_iter_changed = Signal(int)
     center_changed = Signal(float)
     tilt_changed = Signal(float)
     load_config_requested = Signal()
@@ -115,6 +124,19 @@ class BasicSettingsTab(QWidget):
         ])
         self.backend_combo.currentTextChanged.connect(self.backend_changed)
 
+        # Only meaningful for the iterative backends (SIRT/SART/ART/CGLS
+        # -- see ReconstructionBackend.is_iterative); hidden for the rest,
+        # which ignore it entirely. algotom's own default, used whenever
+        # this is left unset, is num_iter=1 -- a single sweep, nowhere
+        # near converged, which is why an iterative backend can otherwise
+        # look "wrong" compared to FBP/gridrec/BPF/DFI: those are direct,
+        # non-iterative inversions, always fully "converged" by
+        # construction, so they have nothing comparable to tune.
+        self.num_iter_spin = QSpinBox(self)
+        self.num_iter_spin.setRange(1, 10_000_000)
+        self.num_iter_spin.valueChanged.connect(self.num_iter_changed)
+        self.num_iter_label = QLabel("Iterations", self)
+
         self.device_combo = QComboBox(self)
         self.device_combo.addItems([label for label, _ in _DEVICE_CHOICES])
         self.device_combo.setToolTip(
@@ -145,6 +167,7 @@ class BasicSettingsTab(QWidget):
         form.addRow("Pixel size", self.pixel_size_spin)
         form.addRow("Slice (z)", self.slice_spin)
         form.addRow("Reconstruction algorithm", self.backend_combo)
+        form.addRow(self.num_iter_label, self.num_iter_spin)
         form.addRow("Device", self.device_combo)
         form.addRow("Center of rotation", self.center_spin)
         form.addRow("Tilt (deg)", self.tilt_spin)
@@ -154,7 +177,7 @@ class BasicSettingsTab(QWidget):
         layout.addWidget(load_config_btn)
         layout.addStretch()
 
-    def set_values(self, geometry_type: str, angle_span: float, angle_span_derived: bool, pixel_size: float, pixel_size_derived: bool, slice_index: int, slice_max: int, backend: str, device: Optional[str], center: float, tilt_deg: float, width: int) -> None:
+    def set_values(self, geometry_type: str, angle_span: float, angle_span_derived: bool, pixel_size: float, pixel_size_derived: bool, slice_index: int, slice_max: int, backend: str, num_iter: int, is_iterative: bool, device: Optional[str], center: float, tilt_deg: float, width: int) -> None:
         # setMaximum()/setRange() below can themselves clamp the
         # widget's current (still the *previous* session's) value and
         # emit valueChanged synchronously -- by the time that fires,
@@ -207,6 +230,19 @@ class BasicSettingsTab(QWidget):
         )
         self._silently(self.slice_spin, _set_slice)
         self._silently(self.backend_combo, lambda: self.backend_combo.setCurrentText(backend))
+        self._silently(self.num_iter_spin, lambda: self.num_iter_spin.setValue(num_iter))
+        self.num_iter_spin.setVisible(is_iterative)
+        self.num_iter_label.setVisible(is_iterative)
+        self.num_iter_spin.setToolTip(
+            "Full sweeps over every projection (algotom's own default, used whenever this is left "
+            "unset, is 1 -- almost always too few for a real reconstruction). ART is the exception: "
+            "its 'iterations' are individual ray updates, not sweeps, so it needs a MUCH larger value "
+            "here, on the order of (number of projections) x (detector width) -- see doc/RECONSTRUCTION.md."
+            if backend == "algotom_art"
+            else "Full sweeps over every projection. algotom's own default, used whenever this is left "
+                 "unset, is 1 -- almost always too few for a real reconstruction; 50 is a reasonable "
+                 "starting point."
+        )
         device_index = next((i for i, (_, value) in enumerate(_DEVICE_CHOICES) if value == device), 0)
         self._silently(self.device_combo, lambda: self.device_combo.setCurrentIndex(device_index))
         self._silently(self.center_spin, _set_center)
@@ -497,6 +533,7 @@ class AdjustmentPanel(QWidget):
         self.basic_tab.pixel_size_changed.connect(self._on_pixel_size_changed)
         self.basic_tab.slice_changed.connect(self._on_slice_changed)
         self.basic_tab.backend_changed.connect(self._on_backend_changed)
+        self.basic_tab.num_iter_changed.connect(self._on_num_iter_changed)
         self.basic_tab.device_changed.connect(self._on_device_changed)
         self.basic_tab.center_changed.connect(self._on_center_changed)
         self.basic_tab.tilt_changed.connect(self._on_tilt_changed)
@@ -539,7 +576,7 @@ class AdjustmentPanel(QWidget):
         config = session.config
         project = session.run.project if session.run is not None else None
 
-        n_rows, width = 1, 0
+        n_angles, n_rows, width = 0, 1, 0
         geometry_type = ""
         angle_span = 180.0  # the common case (a half-turn scan); overridden below if known
         angle_span_derived = False  # True once a real, already-known value is shown (read-only)
@@ -547,7 +584,7 @@ class AdjustmentPanel(QWidget):
         pixel_size_derived = False  # True only when source == "file" -- a real, measured value
         if project is not None:
             di = DataInterface(project)
-            _, n_rows, width = di.shape_of("projections")
+            n_angles, n_rows, width = di.shape_of("projections")
             geometry_type = di.get_metadata("geometry_type") or ""
             resolved_span = di.get_metadata("angle_span")
             if resolved_span is not None:
@@ -575,6 +612,18 @@ class AdjustmentPanel(QWidget):
         if session.export_rows is None and n_rows:
             session.export_rows = (0, n_rows - 1)  # the full range, same "resolve once, on first knowledge" pattern
 
+        if "num_iter" not in config.reconstruction_options and get_backend(config.reconstruction_backend).is_iterative and n_angles and width:
+            # Seeded once, on first knowledge -- same pattern as center/
+            # preview_row/export_rows above -- so an iterative backend
+            # actually gets a real num_iter passed through to reconstruct()
+            # instead of silently falling back to algotom's own default
+            # of 1 (see BasicSettingsTab.num_iter_spin's docstring/tooltip).
+            # ART's very different iteration semantics need a much larger
+            # value than the others -- see reconstruction/backends/algotom_astra.py.
+            config.reconstruction_options["num_iter"] = (
+                n_angles * width if config.reconstruction_backend == "algotom_art" else _DEFAULT_NUM_ITER
+            )
+
         self.basic_tab.set_values(
             geometry_type=geometry_type,
             angle_span=angle_span,
@@ -584,6 +633,8 @@ class AdjustmentPanel(QWidget):
             slice_index=session.preview_row or 0,
             slice_max=n_rows - 1,
             backend=config.reconstruction_backend,
+            num_iter=config.reconstruction_options.get("num_iter", _DEFAULT_NUM_ITER),
+            is_iterative=get_backend(config.reconstruction_backend).is_iterative,
             device=config.device,
             center=config.center if config.center is not None else 0.0,
             tilt_deg=config.tilt_deg if config.tilt_deg is not None else 0.0,
@@ -626,6 +677,17 @@ class AdjustmentPanel(QWidget):
     def _on_backend_changed(self, value: str) -> None:
         if self.session is not None and value:
             self.session.config.reconstruction_backend = value
+            # Re-syncs num_iter_spin's visibility/tooltip/value for the
+            # new backend (seeding a first-time default if it's iterative
+            # and none exists yet) -- see the "num_iter" seeding block in
+            # _refresh_from_session(). Safe to re-run in full: every other
+            # value it touches is either read straight back from config/
+            # session or a "resolve once" field that's already resolved.
+            self._refresh_from_session()
+
+    def _on_num_iter_changed(self, value: int) -> None:
+        if self.session is not None:
+            self.session.config.reconstruction_options["num_iter"] = value
 
     def _on_device_changed(self, value) -> None:
         if self.session is not None:

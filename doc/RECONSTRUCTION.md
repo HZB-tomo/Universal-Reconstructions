@@ -78,10 +78,14 @@ exposes -- none of this is a new reconstruction implementation.
 | `algotom_art` | same, `"ART"` | CPU/GPU | same -- see the note below, `num_iter` behaves very differently here |
 | `algotom_cgls` | same, `"CGLS"` | CPU/GPU | same |
 
-FBP/gridrec/BPF/DFI are analytic (one pass, fast); BP/SIRT/SART/ART/CGLS
-are iterative except BP itself (slower, but handle noisy/sparse/
-limited-angle data better) -- iteration count is `num_iter` in
-`**options`, algotom's own default of `1` is almost always too few.
+FBP/gridrec/BPF/DFI are analytic (one pass, fast); of BP/SIRT/SART/
+ART/CGLS, SIRT/SART/ART/CGLS are iterative (BP itself isn't -- see
+`ReconstructionBackend.is_iterative`) -- iteration count is `num_iter`
+in `**options`, algotom's own default of `1` is almost always too few.
+In the GUI, `num_iter` has its own "Iterations" control in Basic
+settings, shown only for those four backends -- see
+doc/GUI_ARCHITECTURE.md's "Basic settings" section; via the CLI/
+scripting API, pass `num_iter` explicitly in `reconstruction_options`.
 
 `algotom_art` is a trap if used like the other three: ASTRA's plain
 `'ART'` counts individual ray (row) updates, not full sweeps over every
