@@ -51,7 +51,11 @@ def remove_zinger(sinogram: np.ndarray, threshold: float = 0.08, size: int = 2) 
     return remo.remove_zinger(sinogram, threshold, size=size)
 
 
-RingMethod = Literal["sorting", "filtering", "fitting", "normalization", "all"]
+RingMethod = Literal[
+    "sorting", "filtering", "fitting", "normalization", "all",
+    "large_stripe", "dead_stripe", "interpolation", "2d_filtering_sorting",
+    "fft", "wavelet_fft", "regularization",
+]
 
 _RING_METHODS = {
     "sorting": "remove_stripe_based_sorting",
@@ -59,6 +63,13 @@ _RING_METHODS = {
     "fitting": "remove_stripe_based_fitting",
     "normalization": "remove_stripe_based_normalization",
     "all": "remove_all_stripe",
+    "large_stripe": "remove_large_stripe",
+    "dead_stripe": "remove_dead_stripe",
+    "interpolation": "remove_stripe_based_interpolation",
+    "2d_filtering_sorting": "remove_stripe_based_2d_filtering_sorting",
+    "fft": "remove_stripe_based_fft",
+    "wavelet_fft": "remove_stripe_based_wavelet_fft",
+    "regularization": "remove_stripe_based_regularization",
 }
 
 

@@ -3,12 +3,13 @@ AdjustmentPanel: tabbed controls for the currently open project, plus
 the two reconstruct actions, which sit outside the tabs so they're
 reachable no matter which tab is active. See doc/GUI_ARCHITECTURE.md.
 
-Tabs: Basic settings, Automatic adjustments, Refinements (not
-implemented), Save settings.
+Tabs: Basic settings, Automatic adjustments, Refinements, Save
+settings.
 """
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -30,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from calibration import find_center, find_tilt
 from core.data_interface import DataInterface
-from orchestration import PipelineRun, load_config
+from orchestration import PipelineRun, load_config, save_config
 from preprocessing import build_reference, normalize_slice
 from reconstruction import get_backend, resolve_device
 
@@ -71,7 +72,10 @@ class BasicSettingsTab(QWidget):
     num_iter_changed = Signal(int)
     center_changed = Signal(float)
     tilt_changed = Signal(float)
+    rotate_changed = Signal(float)
     load_config_requested = Signal()
+    export_config_requested = Signal()
+    export_config_as_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -158,8 +162,42 @@ class BasicSettingsTab(QWidget):
         self.tilt_spin.setDecimals(3)
         self.tilt_spin.valueChanged.connect(self.tilt_changed)
 
+        # ProjectConfig.rotate_deg: rotates the reconstructed volume about
+        # the scan axis (every xy slice, uniformly) -- see
+        # reconstruction/rotation.py. Unlike tilt_spin above, this isn't a
+        # physical property of the scan to find; it's a requested output
+        # rotation, so the full +/-360deg range is allowed.
+        self.rotate_spin = QDoubleSpinBox(self)
+        self.rotate_spin.setRange(-360.0, 360.0)
+        self.rotate_spin.setDecimals(2)
+        self.rotate_spin.setSuffix(" deg")
+        self.rotate_spin.setToolTip(
+            "Rotate the reconstructed volume about the scan axis. Exact (reorders the sinogram's "
+            "angle axis) when the scan covers a full 180deg (parallel-beam) or 360deg period; "
+            "otherwise falls back to rotating the reconstructed image -- see doc/RECONSTRUCTION.md's "
+            "\"Rotation\" section."
+        )
+        self.rotate_spin.valueChanged.connect(self.rotate_changed)
+
         load_config_btn = QPushButton("Load config file...", self)
         load_config_btn.clicked.connect(self.load_config_requested)
+
+        # orchestration.save_config() -- writes this project's current
+        # settings as a .ini "recipe" (same format load_config_btn
+        # reads). export_config_btn writes next to the project's own
+        # data file with no prompt (repeatable, like Ctrl+S); "Save
+        # config as..." opens a Save-As dialog for an explicit path.
+        export_config_btn = QPushButton("Save config", self)
+        export_config_btn.setToolTip("Writes this project's current settings as a .ini file next to its data file.")
+        export_config_btn.clicked.connect(self.export_config_requested)
+
+        export_config_as_btn = QPushButton("Save config as...", self)
+        export_config_as_btn.clicked.connect(self.export_config_as_requested)
+
+        config_file_row = QHBoxLayout()
+        config_file_row.addWidget(load_config_btn)
+        config_file_row.addWidget(export_config_btn)
+        config_file_row.addWidget(export_config_as_btn)
 
         form = QFormLayout()
         form.addRow("Geometry type", self.geometry_combo)
@@ -171,13 +209,14 @@ class BasicSettingsTab(QWidget):
         form.addRow("Device", self.device_combo)
         form.addRow("Center of rotation", self.center_spin)
         form.addRow("Tilt (deg)", self.tilt_spin)
+        form.addRow("Rotate (deg)", self.rotate_spin)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
-        layout.addWidget(load_config_btn)
+        layout.addLayout(config_file_row)
         layout.addStretch()
 
-    def set_values(self, geometry_type: str, angle_span: float, angle_span_derived: bool, pixel_size: float, pixel_size_derived: bool, slice_index: int, slice_max: int, backend: str, num_iter: int, is_iterative: bool, device: Optional[str], center: float, tilt_deg: float, width: int) -> None:
+    def set_values(self, geometry_type: str, angle_span: float, angle_span_derived: bool, pixel_size: float, pixel_size_derived: bool, slice_index: int, slice_max: int, backend: str, num_iter: int, is_iterative: bool, device: Optional[str], center: float, tilt_deg: float, rotate_deg: float, width: int) -> None:
         # setMaximum()/setRange() below can themselves clamp the
         # widget's current (still the *previous* session's) value and
         # emit valueChanged synchronously -- by the time that fires,
@@ -247,6 +286,7 @@ class BasicSettingsTab(QWidget):
         self._silently(self.device_combo, lambda: self.device_combo.setCurrentIndex(device_index))
         self._silently(self.center_spin, _set_center)
         self._silently(self.tilt_spin, lambda: self.tilt_spin.setValue(tilt_deg))
+        self._silently(self.rotate_spin, lambda: self.rotate_spin.setValue(rotate_deg))
 
     def set_center(self, value: float) -> None:
         self._silently(self.center_spin, lambda: self.center_spin.setValue(value))
@@ -279,13 +319,103 @@ class AutomaticAdjustmentsTab(QWidget):
 
 
 class RefinementsTab(QWidget):
+    """
+    preprocessing.remove_ring_artifacts()/remove_zinger() (see
+    preprocessing/corrections.py), applied in PipelineRun.preprocess()
+    and the streaming per-chunk loop -- like Basic settings, changes
+    here affect the preview reconstruct buttons immediately, not just
+    "Reconstruct selected".
+    """
+
+    ring_correction_toggled = Signal(bool)
+    ring_method_changed = Signal(str)
+    zinger_removal_toggled = Signal(bool)
+    zinger_threshold_changed = Signal(float)
+    zinger_size_changed = Signal(int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        label = QLabel("Ring and zinger artifact removal. Not implemented yet.", self)
-        label.setWordWrap(True)
+
+        self.ring_checkbox = QCheckBox("Ring correction", self)
+        self.ring_checkbox.toggled.connect(self.ring_correction_toggled)
+        self.ring_checkbox.toggled.connect(self._on_ring_toggled)
+
+        # preprocessing/corrections.py's RingMethod -- the algotom
+        # stripe-removal variants this codebase wraps.
+        self.ring_method_combo = QComboBox(self)
+        self.ring_method_combo.addItems([
+            "sorting", "filtering", "fitting", "normalization", "all",
+            "large_stripe", "dead_stripe", "interpolation", "2d_filtering_sorting",
+            "fft", "wavelet_fft", "regularization",
+        ])
+        self.ring_method_combo.setToolTip(
+            "sorting: general-purpose, least aggressive.\n"
+            "filtering: sorting plus a smoothing filter.\n"
+            "fitting: polynomial fit per column -- smooth/broad stripes.\n"
+            "normalization: column-mean based.\n"
+            "all: algotom's own combined multi-method pass.\n"
+            "large_stripe: high-contrast/large stripes specifically.\n"
+            "dead_stripe: unresponsive or fluctuating detector columns.\n"
+            "interpolation: large+dead-stripe detection, interpolated across.\n"
+            "2d_filtering_sorting: 2D low-pass filter + sorting.\n"
+            "fft: Fourier-domain stripe suppression.\n"
+            "wavelet_fft: wavelet + FFT, handles mixed-width stripes, costlier.\n"
+            "regularization: regularized (TV-like) column correction."
+        )
+        self.ring_method_combo.currentTextChanged.connect(self.ring_method_changed)
+
+        self.zinger_checkbox = QCheckBox("Zinger removal", self)
+        self.zinger_checkbox.toggled.connect(self.zinger_removal_toggled)
+        self.zinger_checkbox.toggled.connect(self._on_zinger_toggled)
+
+        self.zinger_threshold_spin = QDoubleSpinBox(self)
+        self.zinger_threshold_spin.setRange(0.0, 10.0)
+        self.zinger_threshold_spin.setDecimals(3)
+        self.zinger_threshold_spin.setToolTip("Outlier detection threshold. algotom's own default is 0.08.")
+        self.zinger_threshold_spin.valueChanged.connect(self.zinger_threshold_changed)
+
+        self.zinger_size_spin = QSpinBox(self)
+        self.zinger_size_spin.setRange(1, 50)
+        self.zinger_size_spin.setToolTip("Median filter size used to detect outliers. algotom's own default is 2.")
+        self.zinger_size_spin.valueChanged.connect(self.zinger_size_changed)
+
+        form = QFormLayout()
+        form.addRow("", self.ring_checkbox)
+        form.addRow("Ring method", self.ring_method_combo)
+        form.addRow("", self.zinger_checkbox)
+        form.addRow("Zinger threshold", self.zinger_threshold_spin)
+        form.addRow("Zinger size", self.zinger_size_spin)
+
         layout = QVBoxLayout(self)
-        layout.addWidget(label)
+        layout.addLayout(form)
         layout.addStretch()
+
+        self._on_ring_toggled(False)
+        self._on_zinger_toggled(False)
+
+    def _on_ring_toggled(self, checked: bool) -> None:
+        self.ring_method_combo.setEnabled(checked)
+
+    def _on_zinger_toggled(self, checked: bool) -> None:
+        self.zinger_threshold_spin.setEnabled(checked)
+        self.zinger_size_spin.setEnabled(checked)
+
+    def set_values(
+        self, ring_correction: bool, ring_method: str, zinger_removal: bool, zinger_threshold: float, zinger_size: int,
+    ) -> None:
+        self._silently(self.ring_checkbox, lambda: self.ring_checkbox.setChecked(ring_correction))
+        self._on_ring_toggled(ring_correction)
+        self._silently(self.ring_method_combo, lambda: self.ring_method_combo.setCurrentText(ring_method))
+        self._silently(self.zinger_checkbox, lambda: self.zinger_checkbox.setChecked(zinger_removal))
+        self._on_zinger_toggled(zinger_removal)
+        self._silently(self.zinger_threshold_spin, lambda: self.zinger_threshold_spin.setValue(zinger_threshold))
+        self._silently(self.zinger_size_spin, lambda: self.zinger_size_spin.setValue(zinger_size))
+
+    @staticmethod
+    def _silently(widget, fn) -> None:
+        widget.blockSignals(True)
+        fn()
+        widget.blockSignals(False)
 
 
 class SaveSettingsTab(QWidget):
@@ -421,7 +551,6 @@ class SaveSettingsTab(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
-        layout.addWidget(QLabel("Rotation: not implemented yet.", self))
         layout.addStretch()
 
         self._on_dtype_changed(self.dtype_combo.currentText())
@@ -558,7 +687,15 @@ class AdjustmentPanel(QWidget):
         self.basic_tab.device_changed.connect(self._on_device_changed)
         self.basic_tab.center_changed.connect(self._on_center_changed)
         self.basic_tab.tilt_changed.connect(self._on_tilt_changed)
+        self.basic_tab.rotate_changed.connect(self._on_rotate_changed)
+        self.refinements_tab.ring_correction_toggled.connect(self._on_ring_correction_toggled)
+        self.refinements_tab.ring_method_changed.connect(self._on_ring_method_changed)
+        self.refinements_tab.zinger_removal_toggled.connect(self._on_zinger_removal_toggled)
+        self.refinements_tab.zinger_threshold_changed.connect(self._on_zinger_threshold_changed)
+        self.refinements_tab.zinger_size_changed.connect(self._on_zinger_size_changed)
         self.basic_tab.load_config_requested.connect(self._load_config_file)
+        self.basic_tab.export_config_requested.connect(self._export_config)
+        self.basic_tab.export_config_as_requested.connect(self._export_config_as)
         self.auto_tab.find_cor_requested.connect(self._find_cor)
         self.auto_tab.find_tilt_requested.connect(self._find_tilt)
         self.save_tab.changed.connect(self._on_save_settings_changed)
@@ -659,7 +796,15 @@ class AdjustmentPanel(QWidget):
             device=config.device,
             center=config.center if config.center is not None else 0.0,
             tilt_deg=config.tilt_deg if config.tilt_deg is not None else 0.0,
+            rotate_deg=config.rotate_deg if config.rotate_deg is not None else 0.0,
             width=width,
+        )
+        self.refinements_tab.set_values(
+            ring_correction=config.ring_correction,
+            ring_method=config.ring_method,
+            zinger_removal=config.zinger_removal,
+            zinger_threshold=config.zinger_threshold if config.zinger_threshold is not None else 0.08,
+            zinger_size=config.zinger_size if config.zinger_size is not None else 2,
         )
         rows_from, rows_to = session.export_rows or (0, max(n_rows - 1, 0))
         self.save_tab.set_values(
@@ -724,6 +869,33 @@ class AdjustmentPanel(QWidget):
         if self.session is not None:
             self.session.config.tilt_deg = value
             self.session_changed.emit(self.session)
+
+    def _on_rotate_changed(self, value: float) -> None:
+        if self.session is not None:
+            self.session.config.rotate_deg = value
+            self.session_changed.emit(self.session)
+
+    # -- refinements edits ----------------------------------------------------
+
+    def _on_ring_correction_toggled(self, checked: bool) -> None:
+        if self.session is not None:
+            self.session.config.ring_correction = checked
+
+    def _on_ring_method_changed(self, value: str) -> None:
+        if self.session is not None and value:
+            self.session.config.ring_method = value
+
+    def _on_zinger_removal_toggled(self, checked: bool) -> None:
+        if self.session is not None:
+            self.session.config.zinger_removal = checked
+
+    def _on_zinger_threshold_changed(self, value: float) -> None:
+        if self.session is not None:
+            self.session.config.zinger_threshold = value
+
+    def _on_zinger_size_changed(self, value: int) -> None:
+        if self.session is not None:
+            self.session.config.zinger_size = value
 
     def _on_save_settings_changed(self) -> None:
         if self.session is None:
@@ -813,6 +985,25 @@ class AdjustmentPanel(QWidget):
         self._refresh_from_session()
         self.session_changed.emit(self.session)
         self.status_message.emit(f"loaded config from {path}")
+
+    def _default_config_path(self) -> Path:
+        return Path(self.session.config.path).parent / f"{self.session.project_id}_config.ini"
+
+    def _export_config(self) -> None:
+        if self.session is None:
+            return
+        path = self._default_config_path()
+        save_config(self.session.config, path)
+        self.status_message.emit(f"saved config to {path}")
+
+    def _export_config_as(self) -> None:
+        if self.session is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save config file", str(self._default_config_path()), "Config files (*.ini)")
+        if not path:
+            return
+        save_config(self.session.config, path)
+        self.status_message.emit(f"saved config to {path}")
 
     # -- automatic adjustments ------------------------------------------------
 

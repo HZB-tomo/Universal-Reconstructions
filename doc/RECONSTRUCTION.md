@@ -270,6 +270,51 @@ is computed per chunk (`centers_for_rows()`, using row positions
 relative to `config.rows`' own range) the same way the eager path's
 `calibrate()` computes it for the whole range at once.
 
+## Rotation
+
+`reconstruct_rotated()` is `reconstruct()`, rotated by `rotate_deg`
+degrees about the scan axis (every xy slice, uniformly):
+
+```python
+from reconstruction import Geometry, reconstruct_rotated
+
+volume = reconstruct_rotated(sinogram, angles, center, geometry, backend="algotom_fbp", rotate_deg=30.0)
+```
+
+Same call shape and parameters as `reconstruct()`, plus `rotate_deg`.
+One of two paths runs, chosen automatically per call:
+
+- **Sinogram reorder** (`reconstruction/rotation.py`'s
+  `shift_sinogram()`): relabels the sinogram's angle axis instead of
+  resampling the reconstructed image. Used whenever
+  `supports_exact_rotation(angles, geometry.geometry_type)` is `True`:
+  `angles` evenly spaced, and its span covering either a full
+  parallel-beam half-period (`>= 180deg`, via the identity
+  `p(theta+180, s) = p(theta, -s)`), or a full period (`>= 360deg` --
+  required for `geometry_type="cone"`, since that identity is
+  parallel-beam-only). `rotate_deg` need not land on the angular
+  sampling grid: an off-grid value is linearly interpolated along the
+  angle axis. No built-in backend currently supports `"cone"` (see
+  "Built-in backends" above), so this path's cone-beam branch is only
+  exercised in tests, against a fake backend.
+- **Image-domain fallback**: reconstructs normally, then rotates the
+  volume with `scipy.ndimage.rotate` (bilinear, `reshape=False` --
+  pixels rotated outside the original frame are lost). Used whenever
+  `supports_exact_rotation()` is `False`, e.g. a limited-angle scan
+  (angular span short of 180/360deg) or non-evenly-spaced angles.
+
+`supports_exact_rotation(angles, geometry_type)` is public, for
+checking which path a given scan will take without calling
+`reconstruct_rotated()`.
+
+`ProjectConfig.rotate_deg` (`None` = no rotation) drives this in
+`PipelineRun.reconstruct()` and the streaming per-chunk loop
+identically -- streaming rotates each chunk's own rows independently,
+since rotation is a per-slice operation with no dependency between
+rows. `PipelineRun` logs which path ran
+(`"rotated {deg}deg via sinogram reorder"` / `"... via image-domain
+fallback"`) and records `rotate_deg` in `run.settings`.
+
 ## Writing a backend
 
 ```python

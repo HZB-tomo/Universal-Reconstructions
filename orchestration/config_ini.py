@@ -109,6 +109,7 @@ FIELD_SPECS: dict[str, dict[str, tuple]] = {
     "reconstruction": {
         "backend": ("reconstruction_backend", str),
         "device": ("device", str),
+        "rotate_deg": ("rotate_deg", float),
     },
     "postprocess": {
         "crop": ("crop", _parse_crop),
@@ -124,6 +125,58 @@ FIELD_SPECS: dict[str, dict[str, tuple]] = {
         "stream_chunk_rows": ("stream_chunk_rows", int),
     },
 }
+
+
+def _format_value(value, parse) -> Optional[str]:
+    """The inverse of `parse`, for save_config() below -- only the three
+    non-passthrough parsers need special handling; str/float/int/
+    _literal(...) round-trip through plain str(value)."""
+    if parse is _parse_bool:
+        return "true" if value else "false"
+    if parse is _parse_crop:
+        (z0, z1), (y0, y1), (x0, x1) = value
+        return f"{z0},{z1},{y0},{y1},{x0},{x1}"
+    if parse is _parse_rows:
+        if not isinstance(value, slice):
+            return None  # can't represent a non-slice rows value in this grammar
+        return f"{value.start},{value.stop}"
+    return str(value)
+
+
+def save_config(config: ProjectConfig, path: Union[str, Path]) -> None:
+    """
+    Writes `config` to `path` as single-project INI text -- the inverse
+    of load_config() for a single-project file. Round-trips every field
+    FIELD_SPECS covers, plus completion_answers (its own [completion]
+    section); a field left at `None` is omitted, same as "blank" means
+    to load_config(). reconstruction_options/ring_options are never
+    written -- they're not in the INI grammar at all (see this module's
+    docstring), so a config using them loses those specific values on
+    export.
+    """
+    lines = []
+    for section_name, field_map in FIELD_SPECS.items():
+        section_lines = []
+        for ini_key, (field_name, parse) in field_map.items():
+            value = getattr(config, field_name)
+            if value is None:
+                continue
+            formatted = _format_value(value, parse)
+            if formatted is None:
+                continue
+            section_lines.append(f"{ini_key} = {formatted}")
+        if section_lines:
+            lines.append(f"[{section_name}]")
+            lines.extend(section_lines)
+            lines.append("")
+
+    if config.completion_answers:
+        lines.append("[completion]")
+        for key, value in config.completion_answers.items():
+            lines.append(f"{key} = {value}")
+        lines.append("")
+
+    Path(path).write_text("\n".join(lines).rstrip() + "\n")
 
 
 def _build_config(sections: dict[str, dict[str, str]]) -> tuple[Optional[ProjectConfig], list[str]]:
@@ -259,6 +312,7 @@ storage_mode = ram
 
 [reconstruction]
 backend = algotom_fbp
+# rotate_deg =         # blank = no rotation; degrees about the scan axis
 
 [postprocess]
 dtype = float32

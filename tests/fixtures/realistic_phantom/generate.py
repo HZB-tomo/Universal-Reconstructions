@@ -41,6 +41,7 @@ class PhantomProject:
 def generate(
     shape: tuple[int, int, int] = (48, 64, 64),
     n_angles: int = 200,
+    angle_span: float = 180.0,
     n_flats: int = 10,
     n_darks: int = 10,
     cor_deviation: float = 0.0,
@@ -66,6 +67,9 @@ def generate(
     See doc/REALISTIC_PHANTOM.md for what each parameter controls, and
     simulate.py's module docstring for the forward model.
 
+    `angle_span` less than 180 produces a limited-angle scan (angles
+    still start at 0, `n_angles` evenly spaced over `[0, angle_span)`).
+
     `attenuation_scale`, if given explicitly, is a total optical depth
     per unit of the ellipse table's density scale -- an arbitrary,
     ungrounded number; nothing about the ellipse table's values ties it
@@ -81,7 +85,7 @@ def generate(
     height, width = shape[0], shape[1]
 
     volume = make_phantom_volume(shape)
-    angles = np.linspace(0, 180, n_angles, endpoint=False)
+    angles = np.linspace(0, angle_span, n_angles, endpoint=False)
     line_integrals = project_parallel(volume, angles)
     line_integrals = apply_cor_and_tilt(line_integrals, cor_deviation, tilt_deg)
 

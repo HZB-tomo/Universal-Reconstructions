@@ -44,7 +44,11 @@ def test_remove_zinger_actually_removes_a_spike():
     assert result[10, 20] < spiked[10, 20]
 
 
-@pytest.mark.parametrize("method", ["sorting", "filtering", "fitting", "normalization", "all"])
+@pytest.mark.parametrize("method", [
+    "sorting", "filtering", "fitting", "normalization", "all",
+    "large_stripe", "dead_stripe", "interpolation", "2d_filtering_sorting",
+    "fft", "wavelet_fft", "regularization",
+])
 def test_remove_ring_artifacts_preserves_shape_for_every_method(method):
     sino = _sinogram()
 

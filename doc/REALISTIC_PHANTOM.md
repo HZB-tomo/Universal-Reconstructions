@@ -45,6 +45,7 @@ same detector position in every angle.
 |---|---|
 | `shape` | `(height, width, width)` of the volume/detector |
 | `n_angles`, `n_flats`, `n_darks` | how many of each frame to generate |
+| `angle_span` | degrees the `n_angles` angles are evenly spaced over, starting at 0. Default `180.0`; less than `180` produces a limited-angle scan |
 | `cor_deviation` | center-of-rotation offset at the middle row, pixels |
 | `tilt_deg` | rotation-axis tilt (axis lean), degrees; the effective center drifts linearly with row |
 | `attenuation_scale` | converts the phantom's unitless density into optical depth; `None` (default) solves for it so the single most-attenuating ray transmits `target_min_transmission` of the free beam, matching how a real acquisition's exposure is set up (see `simulate.py`'s `attenuation_scale_for_min_transmission()`) |

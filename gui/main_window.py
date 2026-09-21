@@ -55,6 +55,9 @@ class MainWindow(QMainWindow):
 
         self.project_panel.project_opened.connect(self._open_project)
         self.project_panel.reconstruct_selected_requested.connect(self._reconstruct_selected)
+        self.project_panel.sessions_removed.connect(self._on_sessions_removed)
+        self.project_panel.settings_pasted.connect(self._on_settings_pasted)
+        self.project_panel.config_exported.connect(self._on_config_exported)
         self.adjustment_panel.status_message.connect(self._show_status)
         self.adjustment_panel.busy_changed.connect(self._on_busy_changed)
         self.adjustment_panel.session_changed.connect(self.project_panel.refresh)
@@ -288,3 +291,24 @@ class MainWindow(QMainWindow):
 
     def _show_status(self, message: str) -> None:
         self.statusBar().showMessage(message)
+
+    # -- project panel: delete / paste settings ------------------------------
+
+    def _on_sessions_removed(self, sessions: list) -> None:
+        if self.adjustment_panel.session in sessions:
+            self.adjustment_panel.set_session(None)
+            self.viewer.clear()
+        self._show_status(f"deleted {len(sessions)} project(s)")
+
+    def _on_settings_pasted(self, sessions: list) -> None:
+        # AdjustmentPanel only reflects session.config/export_crop_yx as
+        # of the last set_session() call -- re-running it now that
+        # ProjectPanel._paste_settings() has changed those values (for
+        # whichever pasted-onto session happens to be the open one)
+        # brings the visible fields back in sync.
+        if self.adjustment_panel.session in sessions:
+            self.adjustment_panel.set_session(self.adjustment_panel.session)
+        self._show_status(f"pasted settings onto {len(sessions)} project(s)")
+
+    def _on_config_exported(self, sessions: list) -> None:
+        self._show_status(f"saved config for {len(sessions)} project(s)")

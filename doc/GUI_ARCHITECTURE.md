@@ -121,10 +121,58 @@ Three independent states per row:
 
 - **checked**: the top-level item's checkbox. `checked_sessions()`
   returns every checked session.
-- **selected**: `QTreeWidget`'s native row selection.
+- **selected**: `QTreeWidget`'s native row selection, extended
+  (multi-select); only top-level (project) rows are selectable, not
+  their `INFO_FIELDS` children.
 - **opened**: double-clicking the top-level item or any child emits
   `project_opened`; `MainWindow._open_project()` loads that project
   into the viewer and points the adjustment panel at it.
+
+### Right-click menu
+
+Right-clicking a project row selects it first if it wasn't already
+part of the current selection, then shows a menu built from
+`self.tree.selectedItems()`:
+
+- **Copy settings** / **Copy selected settings...**: only shown for a
+  single-project selection (copying more than one project's settings
+  at once has no single meaning). "Copy settings" copies every field
+  in `gui/settings_clipboard.py`'s `COPYABLE_SETTINGS` immediately;
+  "Copy selected settings..." opens `CopySettingsDialog`
+  (`gui/copy_settings_dialog.py`) first -- one checkable `QGroupBox`
+  per category, individual checkboxes underneath, global Select
+  all/Deselect all -- and copies only what's checked on accept. Both
+  write into `ProjectPanel._clipboard`, a single in-memory `dict`
+  (`{field_name: value}`), not saved anywhere.
+- **Paste settings**: applies `_clipboard` onto every selected
+  session via `settings_clipboard.paste_settings()`, refreshing each
+  row immediately. Disabled while `_clipboard is None`. Works for a
+  multi-selection.
+- **Export config(s)**: `orchestration.save_config()` for every
+  selected session, each to its own `{project_id}_config.ini` next to
+  its data file, no prompt. Works for a multi-selection (labeled
+  "Export configs" then).
+- **Export config to...**: only shown for a single-project selection
+  (one chosen path can't serve more than one project) -- a Save File
+  dialog, defaulting to the same `{project_id}_config.ini` path.
+- **Delete project(s)**: after a confirm dialog, calls
+  `remove_session()` for every selected session -- drops it from
+  `self.sessions`/the tree, freeing the Python references (there is no
+  `ProjectObject.close()` yet); the underlying data file is untouched.
+
+`sessions_removed`/`settings_pasted` signals carry the affected
+sessions to `MainWindow`, which clears the adjustment panel/viewer if
+the currently-open session was deleted, or re-applies `set_session()`
+if it was pasted onto (so the Basic/Refinements/Save settings fields
+stay in sync with what just changed).
+
+`COPYABLE_SETTINGS` only lists fields that don't come from the
+project's own file (center, tilt, rotate, reconstruction backend/
+device/options, ring/zinger settings, output dtype/clip, crop
+rectangle, export format, stream) -- `project_id`/`path`/`format`/
+`completion_answers` (geometry_type, angle_span, voxel_size, ...) are
+never copyable. `"crop_yx"` is the one key mapped onto
+`ProjectSession.export_crop_yx` instead of a `ProjectConfig` field.
 
 ### Status color
 
@@ -160,10 +208,14 @@ the panel edits; it disables the whole panel when `session` is `None`.
 
 Fields: geometry type, angle span, pixel size, slice (z --
 `session.preview_row`, not a `ProjectConfig` field), reconstruction
-algorithm, number of iterations, device, center of rotation, tilt, and
-a "Load config file..." button (`orchestration.load_config()` on a
-single-project `.ini`, replacing `session.config` while keeping
-`project_id`, and resetting `session.run` to `None`).
+algorithm, number of iterations, device, center of rotation, tilt,
+rotate, and three config-file buttons: "Load config file..."
+(`orchestration.load_config()` on a single-project `.ini`, replacing
+`session.config` while keeping `project_id`, and resetting
+`session.run` to `None`), "Save config" (`orchestration.save_config()`,
+writing next to the project's own data file as
+`{project_id}_config.ini`, no prompt -- repeatable, like Ctrl+S), and
+"Save config as..." (a Save File dialog for an explicit path).
 
 `angle_span`/`geometry_type` write into
 `session.config.completion_answers` when changed -- these are
@@ -194,6 +246,13 @@ The reconstruct status message states the unit (`1/cm`) and, when
 `voxel_size`'s source isn't `"file"`, appends a caveat that the scale
 may not be accurate.
 
+`rotate_spin` writes into `session.config.rotate_deg` (degrees, `0.0` =
+no rotation). Every reconstruct call goes through
+`PipelineRun.reconstruct()`, so the preview buttons here and
+"Reconstruct selected" both pick it up automatically -- see
+doc/RECONSTRUCTION.md's "Rotation" section for the sinogram-reorder/
+image-domain-fallback split.
+
 ### Automatic adjustments
 
 **Find center of rotation**: `build_reference()` +
@@ -213,9 +272,29 @@ written, so the viewer's preview updates immediately.
 
 ### Refinements
 
-Placeholder tab. Ring/zinger removal
-(`ProjectConfig.zinger_removal`/`ring_correction`) has no control here
-yet.
+`preprocessing.remove_ring_artifacts()`/`remove_zinger()`
+(`preprocessing/corrections.py`), applied in `PipelineRun.preprocess()`
+and the streaming per-chunk loop -- like Basic settings, changes here
+affect the preview reconstruct buttons immediately, not just
+"Reconstruct selected".
+
+**Ring correction**: checkbox writing `session.config.ring_correction`,
+plus a method dropdown (`session.config.ring_method`) enabled only
+while checked -- all 12 algotom stripe-removal variants
+`preprocessing/corrections.py`'s `RingMethod` wraps (`sorting`,
+`filtering`, `fitting`, `normalization`, `all`, `large_stripe`,
+`dead_stripe`, `interpolation`, `2d_filtering_sorting`, `fft`,
+`wavelet_fft`, `regularization`), each with a one-line tooltip. `ring_options`
+(backend-specific kwargs) has no GUI control, same as the INI grammar
+-- code-only.
+
+**Zinger removal**: checkbox writing `session.config.zinger_removal`,
+plus threshold/size spin boxes (`zinger_threshold`/`zinger_size`),
+enabled only while checked. Left unedited, both stay `None` on
+`config` (`PipelineRun.preprocess()`'s own defaults, `0.08`/`2`, apply)
+-- the spin boxes only show those defaults, the same "display a
+fallback without writing it back" convention `tilt_spin` uses for
+`tilt_deg=None`.
 
 ### Save settings
 
@@ -253,9 +332,6 @@ both ways: dragging updates them, and typing into them moves the box
 displayed frame -- an out-of-range crop is harmless; numpy slicing
 clips it silently wherever `config.crop` is applied in
 `postprocess()`.
-
-Rotation (a post-reconstruction image rotation, distinct from
-rotation-axis tilt) is not implemented.
 
 ### Reconstruct scope
 
@@ -336,10 +412,7 @@ frame, cached so hovering doesn't trigger a disk read in lazy mode).
 
 ## What isn't built yet
 
-- Copy-settings-between-projects.
 - Dock layout persistence.
-- Rotation control (post-reconstruction image rotation).
-- Refinements tab (ring/zinger removal).
 - Import-from-config (loading a batch `.ini` directly into the project
   panel).
 - A UI for `source_to_detector_distance`/`source_to_object_distance`

@@ -26,7 +26,10 @@ from data_import.errors import AmbiguousVendorMatchError, NoVendorMatchError, Pr
 from data_import.importer import DataImporter
 from data_import.plugin import get_plugin
 from preprocessing import build_reference, normalize_rows, process_volume, remove_ring_artifacts, remove_zinger
-from reconstruction import Geometry, StreamingVolumeWriter, reconstruct, save_volume, to_uint16
+from reconstruction import (
+    Geometry, StreamingVolumeWriter, reconstruct, reconstruct_rotated, save_volume,
+    supports_exact_rotation, to_uint16,
+)
 
 from orchestration import ram_check
 from orchestration.config import PipelineStageError, ProjectConfig
@@ -165,11 +168,21 @@ class PipelineRun:
         )
         angles = di.get_metadata("angles")
 
-        self.volume = reconstruct(
-            self.normalized, angles, self.centers, geometry=geometry,
-            backend=self.config.reconstruction_backend, device=self.config.device,
-            **self.config.reconstruction_options,
-        )
+        if self.config.rotate_deg:
+            self.volume = reconstruct_rotated(
+                self.normalized, angles, self.centers, geometry=geometry,
+                backend=self.config.reconstruction_backend, rotate_deg=self.config.rotate_deg,
+                device=self.config.device, **self.config.reconstruction_options,
+            )
+            self.settings["rotate_deg"] = self.config.rotate_deg
+            method = "sinogram reorder" if supports_exact_rotation(angles, geometry.geometry_type) else "image-domain fallback"
+            self._log(f"rotated {self.config.rotate_deg}deg via {method}")
+        else:
+            self.volume = reconstruct(
+                self.normalized, angles, self.centers, geometry=geometry,
+                backend=self.config.reconstruction_backend, device=self.config.device,
+                **self.config.reconstruction_options,
+            )
         self.settings["backend"] = self.config.reconstruction_backend
         self._log(f"reconstructed volume {self.volume.shape}")
         return self.volume
@@ -351,6 +364,10 @@ class PipelineRun:
             }
         if self.config.crop is not None:
             self.settings["crop"] = self.config.crop
+        if self.config.rotate_deg:
+            self.settings["rotate_deg"] = self.config.rotate_deg
+            method = "sinogram reorder" if supports_exact_rotation(angles, geometry.geometry_type) else "image-domain fallback"
+            self._log(f"rotated {self.config.rotate_deg}deg via {method}")
 
         chunk_rows = self.config.stream_chunk_rows or ram_check.estimate_chunk_rows(width, total_rows)
 
@@ -393,11 +410,18 @@ class PipelineRun:
                 chunk_centers = center if tilt_deg == 0.0 else centers_for_rows(
                     tilt_deg, center, reference_row, np.arange(rel_start, rel_stop),
                 )
-                chunk_volume = reconstruct(
-                    chunk, angles, chunk_centers, geometry=geometry,
-                    backend=self.config.reconstruction_backend, device=self.config.device,
-                    **self.config.reconstruction_options,
-                )
+                if self.config.rotate_deg:
+                    chunk_volume = reconstruct_rotated(
+                        chunk, angles, chunk_centers, geometry=geometry,
+                        backend=self.config.reconstruction_backend, rotate_deg=self.config.rotate_deg,
+                        device=self.config.device, **self.config.reconstruction_options,
+                    )
+                else:
+                    chunk_volume = reconstruct(
+                        chunk, angles, chunk_centers, geometry=geometry,
+                        backend=self.config.reconstruction_backend, device=self.config.device,
+                        **self.config.reconstruction_options,
+                    )
 
                 if self.config.dtype == "uint16":
                     chunk_volume, _ = to_uint16(chunk_volume, self.config.dtype_clip_min, self.config.dtype_clip_max)

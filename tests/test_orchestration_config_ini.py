@@ -1,11 +1,12 @@
 """
 Tests for orchestration/config_ini.py: load_config() (single-project
-and batch grammar), write_config_template(), and resolve_config()'s
-explicit-then-sidecar precedence.
+and batch grammar), save_config(), write_config_template(), and
+resolve_config()'s explicit-then-sidecar precedence.
 """
 import pytest
 
-from orchestration.config_ini import load_config, resolve_config, write_config_template
+from orchestration.config import ProjectConfig
+from orchestration.config_ini import load_config, resolve_config, save_config, write_config_template
 
 
 def test_load_config_single_project_reads_every_section(tmp_path):
@@ -208,6 +209,73 @@ def test_resolve_config_falls_back_to_sidecar(tmp_path):
     config = resolve_config(data_path)
 
     assert config.path == "from_sidecar.h5"
+
+
+def test_save_config_round_trips_through_load_config(tmp_path):
+    config = ProjectConfig(
+        project_id="scanA", path="data/scanA.h5", format="hdf5", storage_mode="disk",
+        completion_answers={"geometry_type": "parallel"},
+        rows=slice(4, 100), zinger_removal=True, zinger_threshold=0.1, zinger_size=3,
+        ring_correction=True, ring_method="large_stripe",
+        calibration_backend="algotom", center=56.0, tilt_deg=0.25,
+        reconstruction_backend="algotom_fbp", device="cpu", rotate_deg=12.5,
+        crop=((4, 8), (0, 96), (0, 96)), dtype="uint16", dtype_clip_min=0.0, dtype_clip_max=0.05,
+        export_format="hdf5", export_path="out/volume.h5", stream=True, stream_chunk_rows=16,
+    )
+    path = tmp_path / "scanA_config.ini"
+
+    save_config(config, path)
+    reloaded = load_config(path)
+
+    for field in (
+        "project_id", "path", "format", "storage_mode", "completion_answers",
+        "zinger_removal", "zinger_threshold", "zinger_size", "ring_correction", "ring_method",
+        "calibration_backend", "center", "tilt_deg",
+        "reconstruction_backend", "device", "rotate_deg",
+        "crop", "dtype", "dtype_clip_min", "dtype_clip_max",
+        "export_format", "export_path", "stream", "stream_chunk_rows",
+    ):
+        assert getattr(reloaded, field) == getattr(config, field), field
+    assert reloaded.rows.start == 4 and reloaded.rows.stop == 100
+
+
+def test_save_config_omits_none_fields(tmp_path):
+    config = ProjectConfig(path="scan.h5", center=None, crop=None, device=None)
+    path = tmp_path / "scan.ini"
+
+    save_config(config, path)
+
+    text = path.read_text()
+    assert "center" not in text
+    assert "crop" not in text
+    assert "device" not in text
+
+
+def test_save_config_skips_reconstruction_and_ring_options(tmp_path):
+    # not in the INI grammar at all (see FIELD_SPECS's module docstring)
+    # -- confirmed by save_config() not raising even when they're set.
+    config = ProjectConfig(
+        path="scan.h5",
+        reconstruction_options={"num_iter": 50},
+        ring_options={"sigma": 3},
+    )
+    path = tmp_path / "scan.ini"
+
+    save_config(config, path)
+
+    text = path.read_text()
+    assert "num_iter" not in text
+    assert "sigma" not in text
+
+
+def test_save_config_writes_completion_answers_section(tmp_path):
+    config = ProjectConfig(path="scan.h5", completion_answers={"geometry_type": "parallel", "sample_name": "foo"})
+    path = tmp_path / "scan.ini"
+
+    save_config(config, path)
+    reloaded = load_config(path)
+
+    assert reloaded.completion_answers == {"geometry_type": "parallel", "sample_name": "foo"}
 
 
 def test_resolve_config_returns_none_when_nothing_found(tmp_path):

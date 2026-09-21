@@ -11,11 +11,26 @@ ProjectPanel was originally a QTableView/QAbstractTableModel).
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QFileDialog,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
+from orchestration import save_config
+from gui.copy_settings_dialog import CopySettingsDialog
 from gui.session import ProjectSession
+from gui.settings_clipboard import ALL_COPYABLE_FIELDS, copy_settings, paste_settings
 
 INFO_FIELDS = ("Status", "Center of rotation", "Tilt", "Format", "Storage")
 
@@ -63,16 +78,23 @@ def _info_values(session: ProjectSession) -> tuple[str, str, str, str, str]:
 class ProjectPanel(QWidget):
     project_opened = Signal(object)  # ProjectSession
     reconstruct_selected_requested = Signal()  # checked_sessions(), see MainWindow._reconstruct_selected()
+    sessions_removed = Signal(list)  # list[ProjectSession] just deleted, for MainWindow to clear if one was open
+    settings_pasted = Signal(list)  # list[ProjectSession] just pasted onto, for MainWindow to refresh if one was open
+    config_exported = Signal(list)  # list[ProjectSession] whose config .ini was just written
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.sessions: list[ProjectSession] = []
         self._items: dict[int, QTreeWidgetItem] = {}  # id(session) -> its top-level item
+        self._clipboard: dict | None = None  # last-copied settings, see gui/settings_clipboard.py
 
         self.tree = QTreeWidget(self)
         self.tree.setHeaderLabels(["Project", "Value"])
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.tree.customContextMenuRequested.connect(self._on_context_menu_requested)
 
         self.reconstruct_selected_btn = QPushButton("Reconstruct selected", self)
         self.reconstruct_selected_btn.clicked.connect(self.reconstruct_selected_requested)
@@ -89,7 +111,9 @@ class ProjectPanel(QWidget):
         item.setCheckState(0, Qt.Checked if session.checked else Qt.Unchecked)
 
         for label, value in zip(INFO_FIELDS, _info_values(session)):
-            item.addChild(QTreeWidgetItem([label, value]))
+            child = QTreeWidgetItem([label, value])
+            child.setFlags(child.flags() & ~Qt.ItemIsSelectable)  # only project rows are selectable
+            item.addChild(child)
 
         self.tree.addTopLevelItem(item)
         self.sessions.append(session)
@@ -139,3 +163,94 @@ class ProjectPanel(QWidget):
         session = top_level.data(0, Qt.UserRole)
         if session is not None:
             self.project_opened.emit(session)
+
+    # -- right-click menu: delete / copy / paste settings --------------------
+
+    def _on_context_menu_requested(self, pos) -> None:
+        item = self.tree.itemAt(pos)
+        if item is None:
+            return
+        top_level = item.parent() or item
+        if top_level not in self.tree.selectedItems():
+            self.tree.setCurrentItem(top_level)  # right-clicking outside the current selection replaces it
+
+        sessions = [it.data(0, Qt.UserRole) for it in self.tree.selectedItems() if it.parent() is None]
+        sessions = [s for s in sessions if s is not None]
+        if not sessions:
+            return
+
+        menu = self._build_context_menu(sessions)
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _build_context_menu(self, sessions: list[ProjectSession]) -> QMenu:
+        menu = QMenu(self)
+        if len(sessions) == 1:
+            # Copying more than one project's settings at once has no
+            # single meaning, so these two are hidden entirely for a
+            # multi-selection rather than acting on just one of them.
+            session = sessions[0]
+            menu.addAction("Copy settings", lambda: self._copy_settings(session, ALL_COPYABLE_FIELDS))
+            menu.addAction("Copy selected settings...", lambda: self._copy_selected_settings(session))
+
+        paste_action = menu.addAction("Paste settings", lambda: self._paste_settings(sessions))
+        paste_action.setEnabled(self._clipboard is not None)
+
+        menu.addSeparator()
+        config_plural = "s" if len(sessions) > 1 else ""
+        menu.addAction(f"Export config{config_plural}", lambda: self._export_configs(sessions))
+        if len(sessions) == 1:
+            # one chosen path can't serve more than one project, same
+            # reasoning as Copy settings/Copy selected settings above.
+            menu.addAction("Export config to...", lambda: self._export_config_as(sessions[0]))
+
+        menu.addSeparator()
+        plural = "s" if len(sessions) > 1 else ""
+        menu.addAction(f"Delete project{plural}", lambda: self._delete_sessions(sessions))
+        return menu
+
+    def _copy_settings(self, session: ProjectSession, field_names: list[str]) -> None:
+        self._clipboard = copy_settings(session, field_names)
+
+    def _copy_selected_settings(self, session: ProjectSession) -> None:
+        dialog = CopySettingsDialog(self)
+        if dialog.exec():
+            self._copy_settings(session, dialog.selected_fields())
+
+    def _paste_settings(self, sessions: list[ProjectSession]) -> None:
+        if self._clipboard is None:
+            return
+        for session in sessions:
+            paste_settings(session, self._clipboard)
+            self.refresh(session)
+        self.settings_pasted.emit(sessions)
+
+    def _delete_sessions(self, sessions: list[ProjectSession]) -> None:
+        plural = "s" if len(sessions) > 1 else ""
+        names = ", ".join(s.project_id for s in sessions)
+        confirmed = QMessageBox.question(
+            self, f"Delete project{plural}",
+            f"Close and free the memory for project{plural} {names}? This can't be undone -- "
+            "re-import the file(s) to bring them back.",
+        )
+        if confirmed != QMessageBox.Yes:
+            return
+        for session in sessions:
+            self.remove_session(session)
+        self.sessions_removed.emit(sessions)
+
+    def _default_config_path(self, session: ProjectSession) -> Path:
+        return Path(session.config.path).parent / f"{session.project_id}_config.ini"
+
+    def _export_configs(self, sessions: list[ProjectSession]) -> None:
+        for session in sessions:
+            save_config(session.config, self._default_config_path(session))
+        self.config_exported.emit(sessions)
+
+    def _export_config_as(self, session: ProjectSession) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save config file", str(self._default_config_path(session)), "Config files (*.ini)",
+        )
+        if not path:
+            return
+        save_config(session.config, path)
+        self.config_exported.emit([session])

@@ -33,6 +33,7 @@ result = PipelineRun(config).run_all()
 | `rows`, `reference_reducer`, `dark_offset`, `zinger_removal`, `zinger_threshold`, `zinger_size`, `ring_correction`, `ring_method` | Preprocessing. `rows=None` means every row. |
 | `calibration_backend`, `center`, `tilt_deg`, `tilt_num_rows`, `tilt_margin`, `tilt_outlier_tolerance` | `center`/`tilt_deg=None` means auto-find (`find_center()`/`find_tilt()`); a value skips finding entirely. |
 | `reconstruction_backend`, `device`, `reconstruction_options` | Reconstruction. `geometry_type` and the cone-beam/pixel-size fields are **not** here -- they come from `project.metadata`, already resolved by completion; see "Geometry fields" below. |
+| `rotate_deg` | Rotate the reconstructed volume by this many degrees about the scan axis. `None` (default) = no rotation. See doc/RECONSTRUCTION.md's "Rotation" section. |
 | `crop`, `dtype`, `dtype_clip_min`, `dtype_clip_max` | Postprocessing. `dtype="uint16"` runs `reconstruction.to_uint16()`. |
 | `export_format`, `export_path`, `export_dataset_path`, `export_extra_settings` | Export. `export_path` may be a template; see "Export path templates" below. |
 | `stream`, `stream_chunk_rows` | `stream=True` reconstructs and writes one chunk of rows at a time instead of the whole volume, so a project too large for RAM as a single reconstruction can still be run -- needs `center`/`tilt_deg` (and, for `dtype="uint16"`, the clip fields above) already resolved. `stream_chunk_rows=None` sizes chunks automatically. See doc/RECONSTRUCTION.md's "Streaming" section. |
@@ -107,14 +108,19 @@ text: plain `key = value` lines, `#` comments, no brackets or commas to
 get wrong, meant to be edited by hand.
 
 ```python
-from orchestration import load_config, write_config_template
+from orchestration import load_config, save_config, write_config_template
 
 write_config_template("scan.ini")   # a commented, fillable example
 config = load_config("scan.ini")
+save_config(config, "scan.ini")     # the reverse -- a config's current values, as single-project INI text
 ```
 
 A blank value means "use `ProjectConfig`'s own default" -- the same as
-not writing that line at all.
+not writing that line at all. `save_config()` omits a field entirely
+when it's `None`, for the same reason. It round-trips every field
+`FIELD_SPECS` covers, plus `completion_answers` (its own
+`[completion]` section); `reconstruction_options`/`ring_options` are
+never written -- see below, they're not in the INI grammar at all.
 
 ### Single-project grammar
 
@@ -134,6 +140,7 @@ tilt_deg =
 
 [reconstruction]
 backend = algotom_fbp
+rotate_deg =
 
 [export]
 format = hdf5

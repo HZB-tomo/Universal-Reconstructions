@@ -163,7 +163,7 @@ image.
 from preprocessing import remove_zinger, remove_ring_artifacts, process_volume
 
 clean = remove_zinger(sinogram, threshold=0.08)
-clean = remove_ring_artifacts(sinogram, method="sorting")   # or "filtering"/"fitting"/"normalization"/"all"
+clean = remove_ring_artifacts(sinogram, method="sorting")
 
 # batched across every row of a volume, in parallel:
 clean_volume = process_volume(volume, remove_ring_artifacts, method="sorting")
@@ -172,6 +172,14 @@ clean_volume = process_volume(volume, remove_ring_artifacts, method="sorting")
 Run on `normalize()`'s output. Requires the optional `algotom` package
 (`pip install .[preprocessing]` or `pip install algotom`); calling
 these without it installed raises `ImportError`.
+
+`method` is one of `preprocessing.corrections.RingMethod`'s 12 values
+(`sorting`, `filtering`, `fitting`, `normalization`, `all`,
+`large_stripe`, `dead_stripe`, `interpolation`, `2d_filtering_sorting`,
+`fft`, `wavelet_fft`, `regularization`) -- each wraps one
+`algotom.prep.removal` function; see that module's docstrings for what
+each targets and its keyword arguments (forwarded through
+`remove_ring_artifacts(sinogram, method=..., **kwargs)`).
 
 ### Where does the result go?
 

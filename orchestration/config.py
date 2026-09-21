@@ -59,6 +59,13 @@ class ProjectConfig:
     reconstruction_backend: str = "algotom_fbp"
     device: Optional[str] = None
     reconstruction_options: dict = field(default_factory=dict)  # backend-specific, code-only
+    # Rotate the reconstructed volume by this many degrees about the scan
+    # axis (every xy slice, uniformly). None/0.0 = no rotation. See
+    # reconstruction.rotation.reconstruct_rotated() -- rotates the
+    # sinogram's angle axis and reconstructs that when the scan's
+    # angular coverage supports it exactly, falling back to rotating
+    # the reconstructed volume itself otherwise.
+    rotate_deg: Optional[float] = None
 
     # -- postprocess ------------------------------------------------------------
     crop: Optional[tuple] = None                 # ((z0,z1),(y0,y1),(x0,x1))
