@@ -23,7 +23,7 @@ from data_import.plugin import clear_registry
 # reload note below. Any NEW vendor module must be added to this import
 # AND to the reload() calls below, or it will silently stop being
 # registered after the first test that runs.
-from data_import.vendors import generic, synthetic, hypothetical_synchrotron, generic_parallel_synchrotron, bamline
+from data_import.vendors import generic, synthetic, hypothetical_synchrotron, generic_parallel_synchrotron, bamline, ill_neutrons  
 from tests.fixtures.generate_synthetic import generate
 
 
