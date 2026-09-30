@@ -16,20 +16,18 @@ Output HDF5 (streamed frame by frame -- the stack is never held in RAM):
     /entry/instrument/detector/data          projections  (N, H/b, W/b)
     /entry/instrument/detector/flat_fields   flat fields  (F, H/b, W/b)
     /entry/instrument/detector/dark_fields   dark fields  (D, H/b, W/b)
-    /entry/instrument/sample/rotation_angle  degrees
+    /entry/instrument/sample/rotation_angle  degrees (only if angles given)
     /entry/instrument/detector/pixel_size    micrometres, already * bin
     /entry/instrument/source/scan_information_xml   raw XML, for provenance
     root attrs: beamline, converted_from, bin_y, bin_x, bin_method, ...
 
-Angles: ILL's XML carries no angle list and the importer never infers
-angles, so they are generated: `--angle-span` degrees (default 180) over
-the N projections, starting at `--angle-start`. By default the endpoint is
-excluded (N points over [start, start+span)), the usual convention for a
-scan that does not repeat the first view; use `--endpoint` if the last
-projection sits at start+span. Or pass real per-frame angles with
-`--angles-file` (text/CSV/.npy, one value per projection). CHECK THIS
-AGAINST THE ACTUAL SCAN -- a wrong span/direction is a classic cause of a
-bad reconstruction.
+Angles: NOT given by the ILL project, so by default none are written and
+the importer leaves them missing (fill them in later, e.g. in the
+completion stage). Optionally:
+  --angles-file F   real per-frame angles (text/CSV/.npy, one per projection)
+  --angle-span S    ASSUMED uniform sweep of S degrees over the N projections,
+                    from --angle-start (default 0); endpoint excluded unless
+                    --endpoint. The file is tagged angles_source="assumed_uniform".
 
 Binning: `--bin 4` bins 4x4; `--bin-y`/`--bin-x` override per axis.
 `--method mean` (default) or `sum`. If the image size is not divisible by
@@ -209,7 +207,10 @@ def parse_scan_xml(path: Path | None) -> dict:
     return info
 
 
-def load_angles(spec: str | None, n: int, start: float, span: float, endpoint: bool) -> np.ndarray:
+def load_angles(spec, n, start, span, endpoint):
+    """Angles if the user supplied them, else None (nothing is ever assumed)."""
+    if spec and span is not None:
+        raise ValueError("give either --angles-file or --angle-span, not both")
     if spec:
         p = Path(spec)
         angles = np.load(p) if p.suffix == ".npy" else np.loadtxt(p, delimiter="," if p.suffix == ".csv" else None)
@@ -217,6 +218,8 @@ def load_angles(spec: str | None, n: int, start: float, span: float, endpoint: b
         if len(angles) != n:
             raise ValueError(f"--angles-file has {len(angles)} values but there are {n} projections")
         return angles
+    if span is None:
+        return None
     return start + np.linspace(0.0, span, n, endpoint=endpoint)
 
 
@@ -304,7 +307,7 @@ def print_report(info: dict, out=print):
 
 def convert(
     folder, output, bin_y=1, bin_x=1, method="mean", dtype="auto",
-    angle_span=180.0, angle_start=0.0, endpoint=False, angles_file=None,
+    angle_span=None, angle_start=0.0, endpoint=False, angles_file=None,
     pixel_size_um=None, compression="gzip", compression_level=4, batch=16, quiet=False,
 ):
     import h5py
@@ -342,7 +345,10 @@ def convert(
 
     _say(f"Projections {len(proj)} x {h}x{w} ({proj.dtype}) -> {len(proj)} x {hb}x{wb} ({out_dtype}), "
          f"bin=({bin_y},{bin_x}) {method}, pixel size {pixel_size:g} um", quiet)
-    _say(f"Angles: {angles[0]:g} .. {angles[-1]:g} deg ({len(angles)} values)", quiet)
+    if angles is None:
+        _say("Angles: none in the project and none supplied -> not written", quiet)
+    else:
+        _say(f"Angles: {angles[0]:g} .. {angles[-1]:g} deg ({len(angles)} values)", quiet)
 
     output = Path(output)
     t0 = time.time()
@@ -355,13 +361,14 @@ def convert(
             f.attrs["bin_method"] = method
             f.attrs["original_image_shape"] = (h, w)
             f.attrs["original_pixel_size_um"] = base_px
-            f.attrs["angles_generated"] = angles_file is None
+            f.attrs["angles_source"] = "none" if angles is None else ("file" if angles_file else "assumed_uniform")
             args = (bin_y, bin_x, method, out_dtype, comp, batch)
             _stream(f, PROJECTIONS, proj, *args, "projections", quiet)
             _stream(f, FLAT_FIELDS, flats, *args, "flats", quiet)
             _stream(f, DARK_FIELDS, darks, *args, "darks", quiet)
-            f.create_dataset(ANGLES, data=angles)
-            f[ANGLES].attrs["units"] = "degrees"
+            if angles is not None:
+                f.create_dataset(ANGLES, data=angles)
+                f[ANGLES].attrs["units"] = "degrees"
             f.create_dataset(PIXEL_SIZE, data=float(pixel_size))
             f[PIXEL_SIZE].attrs["units"] = "um"
             if info["xml"]["raw"] is not None:
@@ -383,7 +390,7 @@ def main(argv=None):
     p.add_argument("--bin-x", type=int, help="override bin factor along image columns")
     p.add_argument("--method", choices=["mean", "sum"], default="mean")
     p.add_argument("--dtype", default="auto", help="output dtype (default: keep source dtype; float32 for sum of ints)")
-    p.add_argument("--angle-span", type=float, default=180.0, help="total angular range in degrees (default 180)")
+    p.add_argument("--angle-span", type=float, help="optional: ASSUME a uniform sweep of this many degrees (default: write no angles)")
     p.add_argument("--angle-start", type=float, default=0.0)
     p.add_argument("--endpoint", action="store_true", help="last projection is at start+span (default: excluded)")
     p.add_argument("--angles-file", help="text/CSV/.npy with one angle per projection (overrides span/start)")
