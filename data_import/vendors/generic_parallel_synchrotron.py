@@ -11,7 +11,7 @@ HDF5:
     /entry/instrument/detector/data           projections, 3D
     /entry/instrument/detector/flat_fields    flat fields, 3D
     /entry/instrument/detector/dark_fields    dark fields, 3D
-    /entry/instrument/sample/rotation_angle   angles, 1D, degrees
+    /entry/instrument/sample/rotation_angle   angles, 1D, degrees (optional)
     /entry/instrument/detector/pixel_size     voxel size, scalar
     root attribute: beamline == "generic_parallel_synchrotron"
 
@@ -45,7 +45,7 @@ class GenericParallelSynchrotronHdf5Plugin(ImportPlugin):
     format = "hdf5"
 
     signature = Hdf5Signature(
-        required_paths=[_PROJECTIONS, _FLAT_FIELDS, _DARK_FIELDS, _ANGLES, _PIXEL_SIZE],
+        required_paths=[_PROJECTIONS, _FLAT_FIELDS, _DARK_FIELDS, _PIXEL_SIZE],
         required_attrs={"/": {"beamline": "generic_parallel_synchrotron"}},
     )
 
@@ -54,7 +54,7 @@ class GenericParallelSynchrotronHdf5Plugin(ImportPlugin):
             projections=_PROJECTIONS,
             flats=_FLAT_FIELDS,
             darks=_DARK_FIELDS,
-            angles=_ANGLES,
+            angles=_ANGLES if _ANGLES in handle else None,
         )
 
     def parse_metadata(self, handle, path_map: PathMap) -> MetadataBundle:
@@ -64,7 +64,12 @@ class GenericParallelSynchrotronHdf5Plugin(ImportPlugin):
         bundle.set("flats_path", path_map.flats, tier="mandatory_hard")
         bundle.set("darks_path", path_map.darks, tier="mandatory_hard")
 
-        bundle.set("angles", handle[_ANGLES][()], tier="mandatory_soft")
+        if _ANGLES in handle:
+            bundle.set("angles", handle[_ANGLES][()], tier="mandatory_soft")
+        else:
+            # Optional: a converter may not know the angles. Left to the
+            # completion stage (derive from angle_span, or ask).
+            bundle.declare_missing("angles", tier="mandatory_soft")
         bundle.set("voxel_size", handle[_PIXEL_SIZE][()], tier="mandatory_soft", source="file")
         bundle.set("geometry_type", "parallel", tier="mandatory_soft", source="file")
 
