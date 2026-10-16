@@ -86,3 +86,58 @@ def test_geometry_and_identity_fields_are_not_copyable():
     # must never appear here.
     excluded = {"project_id", "path", "format", "storage_mode", "plugin_name", "completion_answers"}
     assert excluded.isdisjoint(ALL_COPYABLE_FIELDS)
+
+
+def test_angle_span_is_copied_through_completion_answers():
+    source = _session()
+    source.config.completion_answers["angle_span"] = 360.0
+    target = _session()
+
+    values = copy_settings(source, ["angle_span"])
+    paste_settings(target, values)
+
+    assert values == {"angle_span": 360.0}
+    assert target.config.completion_answers["angle_span"] == 360.0
+    assert "angle_span" in ALL_COPYABLE_FIELDS
+
+
+def test_angle_span_is_skipped_when_the_source_never_set_one():
+    assert copy_settings(_session(), ["angle_span", "center"]) == {"center": None}
+
+
+def _with_project(session, **sources):
+    """Attach a fake imported project whose metadata fields have the given sources."""
+    from types import SimpleNamespace
+
+    from core.metadata import MetadataBundle
+
+    meta = MetadataBundle()
+    for key, (value, source) in sources.items():
+        meta.set(key, value, tier="mandatory_soft", source=source)
+    session.run = SimpleNamespace(project=SimpleNamespace(metadata=meta))
+    return session
+
+
+def test_geometry_and_pixel_size_are_copied_when_typed():
+    source = _session()
+    source.config.completion_answers.update(geometry_type="parallel", voxel_size=166.0, angle_span=360.0)
+    target = _session()
+
+    paste_settings(target, copy_settings(source, ["geometry_type", "angle_span", "voxel_size"]))
+
+    assert target.config.completion_answers == {"geometry_type": "parallel", "angle_span": 360.0, "voxel_size": 166.0}
+
+
+def test_values_loaded_from_the_source_project_are_not_copied():
+    source = _session()  # nothing typed: the file supplied them, so there is no answer to copy
+    assert copy_settings(source, ["geometry_type", "voxel_size"]) == {}
+
+
+def test_paste_does_not_override_values_the_target_project_already_loaded():
+    target = _with_project(_session(), voxel_size=(20.0, "file"), geometry_type=("cone", "default"))
+
+    paste_settings(target, {"voxel_size": 166.0, "geometry_type": "parallel", "angle_span": 360.0})
+
+    assert "voxel_size" not in target.config.completion_answers      # file-sourced: left alone
+    assert target.config.completion_answers["geometry_type"] == "parallel"  # only a default: overwritten
+    assert target.config.completion_answers["angle_span"] == 360.0

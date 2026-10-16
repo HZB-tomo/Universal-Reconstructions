@@ -23,6 +23,21 @@ If `algotom` is unavailable, a replacement backend only needs to
 implement `CalibrationBackend.find_center()`; nothing in `api.py`
 changes.
 
+## `half_scan_slice()`
+
+```python
+from calibration import half_scan_slice
+
+half = half_scan_slice(angles)
+center = find_center(normalized[half, middle_row, :], backend="algotom")
+result = find_tilt(normalized[half], backend="algotom")
+```
+
+Returns the slice along the angle axis that covers the first 180
+degrees of a scan. For a scan of 180 degrees or less, or when `angles`
+is `None`, it returns `slice(None)`. `PipelineRun.calibrate()` and the
+GUI use it for center and tilt finding.
+
 ## `find_center()`
 
 ```python

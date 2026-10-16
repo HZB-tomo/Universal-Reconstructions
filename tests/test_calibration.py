@@ -402,3 +402,20 @@ def test_find_center_is_unaffected_by_reconstruction_backend_nondeterminism():
     a = find_center(sino_180, backend="algotom")
     b = find_center(sino_180, backend="algotom")
     assert a == b
+
+
+def test_half_scan_slice_keeps_only_the_first_180_degrees_of_a_longer_scan():
+    from calibration import half_scan_slice
+
+    angles = np.linspace(0, 360, 1200, endpoint=False)
+    assert half_scan_slice(angles) == slice(0, 600)
+    assert half_scan_slice(-angles) == slice(0, 600)            # clockwise scans
+    assert half_scan_slice(np.linspace(10, 370, 1200, endpoint=False)) == slice(0, 600)  # not starting at 0
+
+
+def test_half_scan_slice_leaves_a_180_degree_or_unknown_scan_alone():
+    from calibration import half_scan_slice
+
+    assert half_scan_slice(None) == slice(None)
+    assert half_scan_slice(np.linspace(0, 180, 900)) == slice(None)
+    assert half_scan_slice(np.linspace(0, 180, 900, endpoint=False)) == slice(None)

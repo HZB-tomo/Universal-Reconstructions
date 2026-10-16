@@ -283,3 +283,11 @@ def test_resolve_config_returns_none_when_nothing_found(tmp_path):
     data_path.write_bytes(b"")
 
     assert resolve_config(data_path) is None
+
+
+def test_projections_normalized_ini_key(tmp_path):
+    path = tmp_path / "scan.ini"
+    path.write_text("[import]\npath = x.h5\n\n[preprocessing]\nprojections_normalized = true\n")
+    assert load_config(path).projections_normalized is True
+    path.write_text("[import]\npath = x.h5\n")
+    assert load_config(path).projections_normalized is False

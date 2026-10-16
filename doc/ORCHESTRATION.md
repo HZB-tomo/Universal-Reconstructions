@@ -30,8 +30,8 @@ result = PipelineRun(config).run_all()
 | `project_id` | Identifier used for logging and export-path templates. Default: stem of `path`. |
 | `path`, `format`, `storage_mode`, `plugin_name` | Import. `plugin_name` disambiguates when more than one plugin could match. |
 | `completion_answers` | Values for fields `completion.run()`'s automatic pass can't resolve (e.g. `geometry_type`, `sample_name`) -- fed through `completion.provide()`. |
-| `rows`, `reference_reducer`, `dark_offset`, `zinger_removal`, `zinger_threshold`, `zinger_size`, `ring_correction`, `ring_method` | Preprocessing. `rows=None` means every row. |
-| `calibration_backend`, `center`, `tilt_deg`, `tilt_num_rows`, `tilt_margin`, `tilt_outlier_tolerance` | `center`/`tilt_deg=None` means auto-find (`find_center()`/`find_tilt()`); a value skips finding entirely. |
+| `rows`, `reference_reducer`, `dark_offset`, `projections_normalized`, `zinger_removal`, `zinger_threshold`, `zinger_size`, `ring_correction`, `ring_method` | Preprocessing. `rows=None` means every row. `projections_normalized=True` skips the flat/dark division; the projections are only scaled by their air level, and flats and darks are not needed. |
+| `calibration_backend`, `center`, `tilt_deg`, `tilt_num_rows`, `tilt_margin`, `tilt_outlier_tolerance` | `center`/`tilt_deg=None` means auto-find (`find_center()`/`find_tilt()`); a value skips finding entirely. For scans longer than 180 degrees, finding uses only the first 180 degrees. |
 | `reconstruction_backend`, `device`, `reconstruction_options` | Reconstruction. `geometry_type` and the cone-beam/pixel-size fields are **not** here -- they come from `project.metadata`, already resolved by completion; see "Geometry fields" below. |
 | `rotate_deg` | Rotate the reconstructed volume by this many degrees about the scan axis. `None` (default) = no rotation. See doc/RECONSTRUCTION.md's "Rotation" section. |
 | `crop`, `dtype`, `dtype_clip_min`, `dtype_clip_max` | Postprocessing. `dtype="uint16"` runs `reconstruction.to_uint16()`. |
@@ -133,6 +133,9 @@ format = hdf5
 
 [completion]
 geometry_type = parallel
+
+[preprocessing]
+projections_normalized = false
 
 [calibration]
 center =

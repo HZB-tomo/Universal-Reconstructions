@@ -32,6 +32,10 @@ class ProjectConfig:
     # -- preprocessing ----------------------------------------------------------
     rows: Optional[Any] = None                   # None = every row
     reference_reducer: Literal["mean", "median"] = "mean"
+    # True = the projections are already flat/dark corrected (e.g. ILL
+    # neutron data): skip the flat/dark division. See
+    # preprocessing.build_reference(already_normalized=...).
+    projections_normalized: bool = False
     dark_offset: Optional[float] = None
     zinger_removal: bool = False
     zinger_threshold: Optional[float] = None

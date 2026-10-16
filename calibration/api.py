@@ -54,6 +54,28 @@ def find_center(
     return backend_instance.find_center(sino_180, start=start, stop=stop, **options)
 
 
+def half_scan_slice(angles, tolerance: float = 1.0) -> slice:
+    """
+    Slice along the angle axis covering the first 180 degrees of a scan.
+
+    find_center()/find_tilt() (Vo's method) assume a 0-180 degree
+    sinogram; given a longer scan (e.g. 0-360) they return a wrong
+    center. Index calibration data with this first:
+    `normalized[half_scan_slice(angles), row, :]`.
+
+    `angles` is the per-projection angle array in degrees. Returns
+    slice(None) (use everything) if angles are unknown or the scan
+    already spans at most 180 degrees (+ `tolerance`).
+    """
+    if angles is None:
+        return slice(None)
+    angles = np.asarray(angles, dtype=float)
+    if angles.size < 2 or np.ptp(angles) <= 180.0 + tolerance:
+        return slice(None)
+    n = int(np.count_nonzero(np.abs(angles - angles[0]) < 180.0))
+    return slice(0, max(n, 2))
+
+
 @dataclass
 class TiltResult:
     """

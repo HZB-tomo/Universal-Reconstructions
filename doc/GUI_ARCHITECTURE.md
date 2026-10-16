@@ -25,6 +25,8 @@ gui/
 `MainWindow` is a `QMainWindow`: two `QDockWidget`s (Projects, left;
 Adjustment, right), movable/floatable but not closable; `ImageViewer`
 is the central widget. Menu bar (`File`, `Tools`) and status bar.
+Tools > Convert TIFF project to HDF5... opens `ConvertDialog`
+(`gui/convert_dialog.py`); see [`CONVERTER.md`](./CONVERTER.md).
 
 Dock layout is not persisted between launches; it resets to the
 default each time.
@@ -143,7 +145,10 @@ part of the current selection, then shows a menu built from
   per category, individual checkboxes underneath, global Select
   all/Deselect all -- and copies only what's checked on accept. Both
   write into `ProjectPanel._clipboard`, a single in-memory `dict`
-  (`{field_name: value}`), not saved anywhere.
+  (`{field_name: value}`), not saved anywhere. The "Scan" category
+  (geometry type, angle span, pixel size) copies only values that were
+  typed in. Values a project loaded from its own file are neither
+  copied nor overwritten on paste.
 - **Paste settings**: applies `_clipboard` onto every selected
   session via `settings_clipboard.paste_settings()`, refreshing each
   row immediately. Disabled while `_clipboard is None`. Works for a
@@ -217,6 +222,11 @@ writing next to the project's own data file as
 `{project_id}_config.ini`, no prompt -- repeatable, like Ctrl+S), and
 "Save config as..." (a Save File dialog for an explicit path).
 
+**Allow editing values loaded from the project**: checkbox at the top of
+Basic settings. When checked, angle span and pixel size values read from
+the project's file can be edited. Edits are stored in
+`session.config.completion_answers`.
+
 `angle_span`/`geometry_type` write into
 `session.config.completion_answers` when changed -- these are
 completion's "ask" fields, resolved here rather than in a separate
@@ -256,13 +266,15 @@ image-domain-fallback split.
 ### Automatic adjustments
 
 **Find center of rotation**: `build_reference()` +
-`normalize_slice()` on the stack's middle row, then `find_center()`.
+`normalize_slice()` on the stack's middle row, then `find_center()` on
+the first 180 degrees of the scan.
 Writes the result into `session.config.center` and the Basic settings
 field.
 
 **Find tilt**: sets `session.config.rows = None`, runs
 `PipelineRun.preprocess()` on the full stack, then `find_tilt()` on
-`run.normalized`. Writes `tilt_deg` the same way.
+`run.normalized` (first 180 degrees of the scan). Writes `tilt_deg` the
+same way.
 
 Both flag the result in the status message (not block it) if it falls
 outside `MAX_PLAUSIBLE_COR_OFFSET_FRACTION` (2% of width from the
@@ -277,6 +289,11 @@ written, so the viewer's preview updates immediately.
 and the streaming per-chunk loop -- like Basic settings, changes here
 affect the preview reconstruct buttons immediately, not just
 "Reconstruct selected".
+
+**Projections already flat/dark corrected**: checkbox writing
+`session.config.projections_normalized`. When checked, the flat/dark
+division is skipped in Find COR, Find tilt, previews and
+reconstruction.
 
 **Ring correction**: checkbox writing `session.config.ring_correction`,
 plus a method dropdown (`session.config.ring_method`) enabled only

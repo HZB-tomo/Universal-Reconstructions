@@ -7,6 +7,7 @@ parsing, calling one function, and printing the result.
     tomo batch <config.ini>        every project in a batch config, independently
     tomo validate <config.ini>     dry-run (single or batch), no reconstruction/export
     tomo init-config <path>        write a commented example config
+    tomo convert <source> <out.h5> convert a project (TIFF folder) to one HDF5 file, optionally binned
 """
 from __future__ import annotations
 
@@ -88,6 +89,29 @@ def _cmd_init_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_convert(args: argparse.Namespace) -> int:
+    from data_import.converter import ConversionError, convert_to_hdf5
+    from data_import.plugin import get_plugin
+
+    bin_y = args.bin_y or args.bin
+    bin_x = args.bin_x or args.bin
+    plugin = get_plugin(args.format, args.plugin) if args.plugin else None
+
+    def progress(done: int, total: int, label: str) -> None:
+        print(f"\r{label}: {done}/{total}", end="", file=sys.stderr, flush=True)
+
+    try:
+        out = convert_to_hdf5(
+            args.source, args.output, format=args.format, plugin=plugin, bin_y=bin_y, bin_x=bin_x,
+            method=args.method, dtype=args.dtype, overwrite=args.overwrite, progress=progress,
+        )
+    except (ConversionError, ValueError) as e:
+        print(f"\nFAILED: {e}", file=sys.stderr)
+        return 1
+    print(f"\nwrote {out}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tomo", description="Run the tomo_project reconstruction pipeline.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -116,6 +140,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--batch", action="store_true", help="Write a batch-shaped template instead of a single-project one.",
     )
     p_init.set_defaults(func=_cmd_init_config)
+
+    p_convert = subparsers.add_parser(
+        "convert", help="Convert a project (TIFF folder or HDF5 file) to one HDF5 file, optionally binned.",
+    )
+    p_convert.add_argument("source", help="Project folder (tiff) or file (hdf5).")
+    p_convert.add_argument("output", help="Output .h5 path.")
+    p_convert.add_argument("--format", choices=["tiff", "hdf5"], default="tiff")
+    p_convert.add_argument("--plugin", help="Registered plugin name; default: auto-detect.")
+    p_convert.add_argument("--bin", type=int, default=1, help="Bin factor for both axes. Default 1.")
+    p_convert.add_argument("--bin-y", type=int, help="Bin factor along rows.")
+    p_convert.add_argument("--bin-x", type=int, help="Bin factor along columns.")
+    p_convert.add_argument("--method", choices=["mean", "sum"], default="mean")
+    p_convert.add_argument("--dtype", default="auto", help="Output dtype. Default: source dtype.")
+    p_convert.add_argument("--overwrite", action="store_true")
+    p_convert.set_defaults(func=_cmd_convert)
 
     return parser
 

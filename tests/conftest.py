@@ -50,6 +50,7 @@ def _fresh_registry():
     importlib.reload(hypothetical_synchrotron)
     importlib.reload(generic_parallel_synchrotron)
     importlib.reload(bamline)
+    importlib.reload(ill_neutrons)
     yield
 
 

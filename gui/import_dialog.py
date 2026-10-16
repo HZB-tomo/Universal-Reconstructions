@@ -21,6 +21,24 @@ from PySide6.QtWidgets import (
 )
 
 
+def select_multiple_directories(parent, title: str) -> list[str]:
+    # QFileDialog.getExistingDirectory only ever returns one path;
+    # multi-directory selection needs the non-native dialog with
+    # its internal views switched to multi-selection.
+    dialog = QFileDialog(parent, title)
+    dialog.setFileMode(QFileDialog.Directory)
+    dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+    list_view = dialog.findChild(QListView, "listView")
+    if list_view is not None:
+        list_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+    tree_view = dialog.findChild(QTreeView)
+    if tree_view is not None:
+        tree_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+    if dialog.exec():
+        return dialog.selectedFiles()
+    return []
+
+
 class ImportDialog(QDialog):
     def __init__(self, storage_mode: str, parent=None):
         super().__init__(parent)
@@ -67,21 +85,7 @@ class ImportDialog(QDialog):
             self._stage(path, "tiff")
 
     def _select_multiple_directories(self) -> list[str]:
-        # QFileDialog.getExistingDirectory only ever returns one path;
-        # multi-directory selection needs the non-native dialog with
-        # its internal views switched to multi-selection.
-        dialog = QFileDialog(self, "Open TIFF project folder(s)")
-        dialog.setFileMode(QFileDialog.Directory)
-        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
-        list_view = dialog.findChild(QListView, "listView")
-        if list_view is not None:
-            list_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        tree_view = dialog.findChild(QTreeView)
-        if tree_view is not None:
-            tree_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        if dialog.exec():
-            return dialog.selectedFiles()
-        return []
+        return select_multiple_directories(self, "Open TIFF project folder(s)")
 
     def _stage(self, path: str, format: str) -> None:
         already_staged = {self.list_widget.item(i).data(Qt.UserRole)[0] for i in range(self.list_widget.count())}

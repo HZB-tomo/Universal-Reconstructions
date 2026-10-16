@@ -155,3 +155,27 @@ def test_normalize_without_dark_field_reduces_to_raw_over_flat():
     result = normalize(projections, reference)
 
     np.testing.assert_allclose(result, projections / reference.flat, rtol=1e-5)
+
+
+def test_already_normalized_ignores_flats_and_darks_and_scales_to_air_level():
+    # Projections that are already transmission * 800 (air level 800); the flat/dark are junk
+    # (strongly vignetted) and must not be used -- and need not even exist.
+    rng = np.random.default_rng(1)
+    transmission = rng.uniform(0.3, 1.0, size=(40, 4, 6)).astype(np.float32)
+    transmission[:, 0, 0] = 1.0  # guarantee open-beam pixels
+    projections = transmission * 800.0
+
+    junk = _project(projections, flats=np.full((1, 4, 6), 10.0, np.float32), darks=np.full((1, 4, 6), 9.0, np.float32))
+    bare = _project(projections)  # no flats/darks at all
+
+    for project in (junk, bare):
+        reference = build_reference(project, already_normalized=True)
+        assert reference.dark == 0.0
+        assert reference.flat.shape == (4, 6)
+        out = normalize_rows(project, slice(None), reference)
+        assert out.shape == projections.shape
+        np.testing.assert_allclose(out.max(), 1.0, atol=0.05)  # scaled to ~1, not divided by the junk flat
+        np.testing.assert_allclose(normalize_slice(project, 2, reference), out[:, 2, :], rtol=1e-6)
+
+    with pytest.raises(MissingFlatFieldError):
+        build_reference(bare)  # the default path still requires flats

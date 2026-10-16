@@ -16,6 +16,7 @@ from orchestration import BatchReport, PipelineRun, PipelineStageError, ProjectC
 
 from orchestration import ram_check
 from gui.adjustment_panel import AdjustmentPanel
+from gui.convert_dialog import ConvertDialog
 from gui.import_dialog import ImportDialog
 from gui.plugin_picker_dialog import PluginPickerDialog
 from gui.project_panel import ProjectPanel
@@ -72,6 +73,7 @@ class MainWindow(QMainWindow):
         self._progress_bar.setVisible(False)
         self.statusBar().addPermanentWidget(self._progress_bar)
 
+        self._convert_dialog = None
         self._build_menu()
         self.statusBar().showMessage("Ready")
 
@@ -94,11 +96,16 @@ class MainWindow(QMainWindow):
         file_menu.addAction("Import...", lambda: self._import(storage_mode="disk"))
         file_menu.addAction("Import to RAM...", lambda: self._import(storage_mode="ram"))
 
-        # Standalone tools -- tiff/hdf5 conversion, a plugin wizard, etc.
-        # Each opens its own window; none of it shares state with the
-        # main app beyond the files it's given. Not designed yet.
+        # Standalone tools. Each opens its own window; none of it shares
+        # state with the main app beyond the files it's given.
         tools_menu = self.menuBar().addMenu("Tools")
-        tools_menu.setEnabled(False)
+        tools_menu.addAction("Convert TIFF project to HDF5...", self._open_convert_dialog)
+
+    def _open_convert_dialog(self) -> None:
+        if self._convert_dialog is None:
+            self._convert_dialog = ConvertDialog(self)
+        self._convert_dialog.show()
+        self._convert_dialog.raise_()
 
     # -- import ---------------------------------------------------------------
 

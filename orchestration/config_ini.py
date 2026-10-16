@@ -92,6 +92,7 @@ FIELD_SPECS: dict[str, dict[str, tuple]] = {
         "rows": ("rows", _parse_rows),
         "reference_reducer": ("reference_reducer", _literal("mean", "median")),
         "dark_offset": ("dark_offset", float),
+        "projections_normalized": ("projections_normalized", _parse_bool),
         "zinger_removal": ("zinger_removal", _parse_bool),
         "zinger_threshold": ("zinger_threshold", float),
         "zinger_size": ("zinger_size", int),
@@ -303,6 +304,7 @@ storage_mode = ram
 
 [preprocessing]
 # rows = 0,100         # start,stop; blank = every row
+# projections_normalized = true   # projections already flat/dark corrected: skip that step
 # zinger_removal = true
 # ring_correction = true
 

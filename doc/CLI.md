@@ -38,6 +38,42 @@ tomo validate batch.ini              # check every project first
 tomo batch batch.ini                 # run all of them, independently
 ```
 
+## Projects with corrected projections or no angles
+
+A project converted with [`ill_to_hdf5.py`](./CONVERTER.md) has no
+angles, and its projections are already flat/dark corrected. Config:
+
+```ini
+[import]
+path = ill.h5
+format = hdf5
+
+[completion]
+angle_span = 360
+
+[preprocessing]
+projections_normalized = true
+ring_correction = true
+ring_method = normalization
+
+[export]
+format = hdf5
+path = out/{project_id}_volume.h5
+```
+
+`geometry_type` is read from the file. Center and tilt are found
+automatically from the first 180 degrees of the scan, or set with
+`center` and `tilt_deg` in `[calibration]`.
+
+## `tomo convert`
+
+```bash
+tomo convert <source> <out.h5> [--bin N] [--plugin NAME] [--overwrite]
+```
+
+Converts a project to one HDF5 file, optionally binned. Exits `0` on
+success, `1` on failure. See [`CONVERTER.md`](./CONVERTER.md).
+
 ## `tomo init-config`
 
 ```bash

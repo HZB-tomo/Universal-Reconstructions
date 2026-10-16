@@ -37,10 +37,18 @@ def build_reference(
     project: ProjectObject,
     reducer: Literal["mean", "median"] = "mean",
     dark_offset: Optional[float] = None,
+    already_normalized: bool = False,
 ) -> FlatDarkReference:
     """
     Reduce a project's flat/dark stacks to the reference normalize()
     needs. Call once per project.
+
+    `already_normalized=True` is for data whose projections were already
+    flat/dark corrected upstream (e.g. ILL neutron projections): flats
+    and darks are ignored (and need not exist), and the reference is a
+    constant "air level" (dark 0, flat = high percentile of the
+    projections), so normalize() just scales the data to about 1.0
+    instead of dividing by a flat that no longer matches it.
 
     Raises MissingFlatFieldError if the project has no flat field data.
 
@@ -51,6 +59,13 @@ def build_reference(
       3. Otherwise, `dark` is 0.0.
     """
     di = DataInterface(project)
+
+    if already_normalized:
+        n_angles, height, width = di.shape_of("projections")
+        step = max(1, n_angles // 20)
+        sample = di.get_projections(index=(slice(0, None, step), slice(None), slice(None)))
+        air_level = float(np.percentile(sample, 98))
+        return FlatDarkReference(flat=np.full((height, width), air_level, dtype=np.float32), dark=0.0)
 
     flats = di.get_flats()
     if flats is None:

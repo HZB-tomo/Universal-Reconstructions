@@ -4,15 +4,14 @@ TIFF. Paired with tests/fixtures/realistic_phantom/, which writes files
 in these layouts (write_hdf5()/write_tiff()), so a generated phantom
 can be imported through the normal DataImporter pipeline.
 
-Both always have flat and dark fields, and are always parallel-beam,
-known unconditionally from the vendor's convention.
+Always parallel-beam, known unconditionally from the vendor's convention.
 
-HDF5:
+HDF5 (only the projections and the root attribute are required):
     /entry/instrument/detector/data           projections, 3D
-    /entry/instrument/detector/flat_fields    flat fields, 3D
-    /entry/instrument/detector/dark_fields    dark fields, 3D
+    /entry/instrument/detector/flat_fields    flat fields, 3D (optional)
+    /entry/instrument/detector/dark_fields    dark fields, 3D (optional)
     /entry/instrument/sample/rotation_angle   angles, 1D, degrees (optional)
-    /entry/instrument/detector/pixel_size     voxel size, scalar
+    /entry/instrument/detector/pixel_size     voxel size, scalar (optional)
     root attribute: beamline == "generic_parallel_synchrotron"
 
 TIFF (a folder):
@@ -45,15 +44,15 @@ class GenericParallelSynchrotronHdf5Plugin(ImportPlugin):
     format = "hdf5"
 
     signature = Hdf5Signature(
-        required_paths=[_PROJECTIONS, _FLAT_FIELDS, _DARK_FIELDS, _PIXEL_SIZE],
+        required_paths=[_PROJECTIONS],
         required_attrs={"/": {"beamline": "generic_parallel_synchrotron"}},
     )
 
     def get_path_map(self, handle) -> PathMap:
         return PathMap(
             projections=_PROJECTIONS,
-            flats=_FLAT_FIELDS,
-            darks=_DARK_FIELDS,
+            flats=_FLAT_FIELDS if _FLAT_FIELDS in handle else None,
+            darks=_DARK_FIELDS if _DARK_FIELDS in handle else None,
             angles=_ANGLES if _ANGLES in handle else None,
         )
 
@@ -61,8 +60,10 @@ class GenericParallelSynchrotronHdf5Plugin(ImportPlugin):
         bundle = MetadataBundle()
 
         bundle.set("projections_path", path_map.projections, tier="mandatory_hard")
-        bundle.set("flats_path", path_map.flats, tier="mandatory_hard")
-        bundle.set("darks_path", path_map.darks, tier="mandatory_hard")
+        if path_map.flats:
+            bundle.set("flats_path", path_map.flats, tier="mandatory_hard")
+        if path_map.darks:
+            bundle.set("darks_path", path_map.darks, tier="mandatory_hard")
 
         if _ANGLES in handle:
             bundle.set("angles", handle[_ANGLES][()], tier="mandatory_soft")
@@ -70,7 +71,10 @@ class GenericParallelSynchrotronHdf5Plugin(ImportPlugin):
             # Optional: a converter may not know the angles. Left to the
             # completion stage (derive from angle_span, or ask).
             bundle.declare_missing("angles", tier="mandatory_soft")
-        bundle.set("voxel_size", handle[_PIXEL_SIZE][()], tier="mandatory_soft", source="file")
+        if _PIXEL_SIZE in handle:
+            bundle.set("voxel_size", handle[_PIXEL_SIZE][()], tier="mandatory_soft", source="file")
+        else:
+            bundle.declare_missing("voxel_size", tier="mandatory_soft")
         bundle.set("geometry_type", "parallel", tier="mandatory_soft", source="file")
 
         bundle.declare_missing("center_of_rotation", tier="computed")

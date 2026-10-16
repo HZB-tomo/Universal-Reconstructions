@@ -19,7 +19,7 @@ from typing import Optional
 import numpy as np
 
 import completion
-from calibration import centers_for_rows, find_center, find_tilt
+from calibration import centers_for_rows, find_center, find_tilt, half_scan_slice
 from core.data_interface import DataInterface
 from core.project import ProjectObject
 from data_import.errors import AmbiguousVendorMatchError, NoVendorMatchError, ProjectImportError
@@ -97,6 +97,7 @@ class PipelineRun:
     def preprocess(self) -> np.ndarray:
         self.reference = build_reference(
             self.project, reducer=self.config.reference_reducer, dark_offset=self.config.dark_offset,
+            already_normalized=self.config.projections_normalized,
         )
         rows = self.config.rows if self.config.rows is not None else slice(None)
         self.normalized = normalize_rows(self.project, rows, self.reference)
@@ -120,11 +121,13 @@ class PipelineRun:
         n_rows = self.normalized.shape[1]
         reference_row = (n_rows - 1) / 2.0
         middle_row = int(round(reference_row))
+        # Vo's COR/tilt methods need a 0-180 degree sinogram, not a full 360 one.
+        half = half_scan_slice(DataInterface(self.project).get_metadata("angles"))
 
         if self.config.center is not None:
             center = self.config.center
         else:
-            center = find_center(self.normalized[:, middle_row, :], backend=self.config.calibration_backend)
+            center = find_center(self.normalized[half, middle_row, :], backend=self.config.calibration_backend)
 
         if self.config.tilt_deg is not None:
             tilt_deg = self.config.tilt_deg
@@ -137,7 +140,7 @@ class PipelineRun:
                 }.items() if v is not None
             }
             tilt_result = find_tilt(
-                self.normalized, backend=self.config.calibration_backend, center=center, **tilt_kwargs,
+                self.normalized[half], backend=self.config.calibration_backend, center=center, **tilt_kwargs,
             )
             tilt_deg = tilt_result.tilt_deg
 
@@ -342,6 +345,7 @@ class PipelineRun:
 
         self.reference = build_reference(
             self.project, reducer=self.config.reference_reducer, dark_offset=self.config.dark_offset,
+            already_normalized=self.config.projections_normalized,
         )
         geometry = Geometry(
             geometry_type=di.get_metadata("geometry_type"),

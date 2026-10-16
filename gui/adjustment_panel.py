@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from calibration import find_center, find_tilt
+from calibration import find_center, find_tilt, half_scan_slice
 from core.data_interface import DataInterface
 from orchestration import PipelineRun, load_config, save_config
 from preprocessing import build_reference, normalize_slice
@@ -199,7 +199,22 @@ class BasicSettingsTab(QWidget):
         config_file_row.addWidget(export_config_btn)
         config_file_row.addWidget(export_config_as_btn)
 
+        # Lets the user edit values the project's own file supplied (angle
+        # span, pixel size), which are otherwise greyed out as read-only.
+        # The edit is stored as a completion answer, which completion
+        # applies over the file's value. (A project that records its own
+        # per-projection angles keeps those angles.)
+        self._angle_span_derived = False
+        self._pixel_size_derived = False
+        self.edit_loaded_checkbox = QCheckBox("Allow editing values loaded from the project", self)
+        self.edit_loaded_checkbox.setToolTip(
+            "Angle span and pixel size read from the project's file are read-only by default. "
+            "Tick this to override them."
+        )
+        self.edit_loaded_checkbox.toggled.connect(self._apply_loaded_editable)
+
         form = QFormLayout()
+        form.addRow("", self.edit_loaded_checkbox)
         form.addRow("Geometry type", self.geometry_combo)
         form.addRow("Angle span", self.angle_span_spin)
         form.addRow("Pixel size", self.pixel_size_spin)
@@ -215,6 +230,10 @@ class BasicSettingsTab(QWidget):
         layout.addLayout(form)
         layout.addLayout(config_file_row)
         layout.addStretch()
+
+    def _apply_loaded_editable(self, allowed: bool) -> None:
+        self.angle_span_spin.setEnabled(not self._angle_span_derived or allowed)
+        self.pixel_size_spin.setEnabled(not self._pixel_size_derived or allowed)
 
     def set_values(self, geometry_type: str, angle_span: float, angle_span_derived: bool, pixel_size: float, pixel_size_derived: bool, slice_index: int, slice_max: int, backend: str, num_iter: int, is_iterative: bool, device: Optional[str], center: float, tilt_deg: float, rotate_deg: float, width: int) -> None:
         # setMaximum()/setRange() below can themselves clamp the
@@ -247,7 +266,8 @@ class BasicSettingsTab(QWidget):
         # completion/derivers.py's derive_angle_span()) -- editing it here
         # would have no effect until a re-import anyway, and greying it out
         # says so instead of inviting a pointless edit.
-        self.angle_span_spin.setEnabled(not angle_span_derived)
+        self._angle_span_derived = angle_span_derived
+        self.angle_span_spin.setEnabled(not angle_span_derived or self.edit_loaded_checkbox.isChecked())
         self.angle_span_spin.setToolTip(
             "Derived from this project's own recorded per-projection angles (max - min). Read-only."
             if angle_span_derived
@@ -260,7 +280,8 @@ class BasicSettingsTab(QWidget):
         # logic as angle_span_spin above, driven by source instead of
         # presence since voxel_size always resolves to *something*
         # (core/known_fields.py's default=1.0), never genuinely missing.
-        self.pixel_size_spin.setEnabled(not pixel_size_derived)
+        self._pixel_size_derived = pixel_size_derived
+        self.pixel_size_spin.setEnabled(not pixel_size_derived or self.edit_loaded_checkbox.isChecked())
         self.pixel_size_spin.setToolTip(
             "Read from this project's own recorded pixel size. Read-only."
             if pixel_size_derived
@@ -327,6 +348,7 @@ class RefinementsTab(QWidget):
     "Reconstruct selected".
     """
 
+    projections_normalized_toggled = Signal(bool)
     ring_correction_toggled = Signal(bool)
     ring_method_changed = Signal(str)
     zinger_removal_toggled = Signal(bool)
@@ -335,6 +357,14 @@ class RefinementsTab(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        self.normalized_checkbox = QCheckBox("Projections already flat/dark corrected", self)
+        self.normalized_checkbox.setToolTip(
+            "Tick if the projections were already normalized upstream (e.g. ILL neutron data).\n"
+            "The flat/dark division is then skipped everywhere: COR/tilt search, previews and\n"
+            "reconstruction. The data is only scaled by its air level."
+        )
+        self.normalized_checkbox.toggled.connect(self.projections_normalized_toggled)
 
         self.ring_checkbox = QCheckBox("Ring correction", self)
         self.ring_checkbox.toggled.connect(self.ring_correction_toggled)
@@ -380,6 +410,7 @@ class RefinementsTab(QWidget):
         self.zinger_size_spin.valueChanged.connect(self.zinger_size_changed)
 
         form = QFormLayout()
+        form.addRow("", self.normalized_checkbox)
         form.addRow("", self.ring_checkbox)
         form.addRow("Ring method", self.ring_method_combo)
         form.addRow("", self.zinger_checkbox)
@@ -402,7 +433,9 @@ class RefinementsTab(QWidget):
 
     def set_values(
         self, ring_correction: bool, ring_method: str, zinger_removal: bool, zinger_threshold: float, zinger_size: int,
+        projections_normalized: bool = False,
     ) -> None:
+        self._silently(self.normalized_checkbox, lambda: self.normalized_checkbox.setChecked(projections_normalized))
         self._silently(self.ring_checkbox, lambda: self.ring_checkbox.setChecked(ring_correction))
         self._on_ring_toggled(ring_correction)
         self._silently(self.ring_method_combo, lambda: self.ring_method_combo.setCurrentText(ring_method))
@@ -688,6 +721,7 @@ class AdjustmentPanel(QWidget):
         self.basic_tab.center_changed.connect(self._on_center_changed)
         self.basic_tab.tilt_changed.connect(self._on_tilt_changed)
         self.basic_tab.rotate_changed.connect(self._on_rotate_changed)
+        self.refinements_tab.projections_normalized_toggled.connect(self._on_projections_normalized_toggled)
         self.refinements_tab.ring_correction_toggled.connect(self._on_ring_correction_toggled)
         self.refinements_tab.ring_method_changed.connect(self._on_ring_method_changed)
         self.refinements_tab.zinger_removal_toggled.connect(self._on_zinger_removal_toggled)
@@ -805,6 +839,7 @@ class AdjustmentPanel(QWidget):
             zinger_removal=config.zinger_removal,
             zinger_threshold=config.zinger_threshold if config.zinger_threshold is not None else 0.08,
             zinger_size=config.zinger_size if config.zinger_size is not None else 2,
+            projections_normalized=config.projections_normalized,
         )
         rows_from, rows_to = session.export_rows or (0, max(n_rows - 1, 0))
         self.save_tab.set_values(
@@ -876,6 +911,10 @@ class AdjustmentPanel(QWidget):
             self.session_changed.emit(self.session)
 
     # -- refinements edits ----------------------------------------------------
+
+    def _on_projections_normalized_toggled(self, checked: bool) -> None:
+        if self.session is not None:
+            self.session.config.projections_normalized = checked
 
     def _on_ring_correction_toggled(self, checked: bool) -> None:
         if self.session is not None:
@@ -1015,11 +1054,15 @@ class AdjustmentPanel(QWidget):
 
         def work() -> float:
             project = session.run.project
-            reference = build_reference(project, reducer=session.config.reference_reducer, dark_offset=session.config.dark_offset)
+            reference = build_reference(
+                project, reducer=session.config.reference_reducer, dark_offset=session.config.dark_offset,
+                already_normalized=session.config.projections_normalized,
+            )
             n_rows = DataInterface(project).shape_of("projections")[1]
             middle_row = n_rows // 2
             sinogram = normalize_slice(project, middle_row, reference)
-            return find_center(sinogram, backend=session.config.calibration_backend)
+            half = half_scan_slice(DataInterface(project).get_metadata("angles"))
+            return find_center(sinogram[half], backend=session.config.calibration_backend)
 
         def done(center: float) -> None:
             self.busy_changed.emit(False)
@@ -1051,8 +1094,9 @@ class AdjustmentPanel(QWidget):
             run = session.run
             run.config.rows = None
             run.preprocess()
+            half = half_scan_slice(DataInterface(run.project).get_metadata("angles"))
             return find_tilt(
-                run.normalized,
+                run.normalized[half],
                 backend=session.config.calibration_backend,
                 center=session.config.center,
                 num_rows=session.config.tilt_num_rows or 12,

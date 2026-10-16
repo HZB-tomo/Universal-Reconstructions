@@ -155,6 +155,15 @@ build_reference(project, dark_offset=100.0)  # no dark data, a known constant of
 the project has. `reference.dark` is then a scalar instead of a 2D
 image.
 
+For projections that are already flat/dark corrected:
+
+```python
+reference = build_reference(project, already_normalized=True)
+```
+
+Flats and darks are ignored and need not exist. `normalize_*()` then
+scales the projections by their air level (98th percentile).
+
 `-log()` is not applied here; it happens at or inside reconstruction.
 
 ### Zinger and ring-artifact removal (optional)
@@ -195,6 +204,16 @@ middle_row = normalized.shape[1] // 2
 center = find_center(normalized[:, middle_row, :], backend="algotom")   # or a manual number
 result = find_tilt(normalized, backend="algotom", num_rows=12, margin=4)
 result.tilt_deg   # degrees
+```
+
+For a scan longer than 180 degrees, pass only the first 180 degrees:
+
+```python
+from calibration import half_scan_slice
+
+half = half_scan_slice(di.get_metadata("angles"))
+center = find_center(normalized[half, middle_row, :], backend="algotom")
+result = find_tilt(normalized[half], backend="algotom")
 ```
 
 `normalized` is the `(n_angles, n_rows, width)` array
