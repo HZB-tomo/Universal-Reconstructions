@@ -1,5 +1,5 @@
 __pycache__/
 *.py[cod]
 .venv/
-gui_samples/tests_geet/
-tests_geet/
+gui_samples/
+tomo_project.egg-info/
