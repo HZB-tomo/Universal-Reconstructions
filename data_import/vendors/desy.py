@@ -4,12 +4,19 @@ Images end in _img.tif[f], _ref.tif[f], or _dar.tif[f]. A single scan log
 supplies metadata; a single matching HDF5 sidecar identifies the beamline.
 This export profile interprets n_angle as the number of angular positions and
 ref_count as the number of projection files. It assumes one image per TIFF.
-All references are passed to the backend, including both flat batches.
+The pre-scan flat batch is preferred. If references exist only after the
+scan, that batch is used instead. The two batches are never combined.
+The final filename counter must be a shared acquisition sequence across
+projections and references. Ambiguous ordering is rejected, not guessed.
+Selected flats remain individual frames; ordinary preprocessing reduces
+that stack in the same way as darks.
 
 The registry uses micrometres for pixel/voxel sizes. Bare eff_pix values use
 millimetres for this export profile; an explicit unit overrides that convention.
 get_res_um is retained separately; spatial resolution is not assumed to be
 pixel spacing. No camera magnification or binning correction is guessed.
+Missing angular coverage defaults to 360 degrees; this is an editable
+assumption, not a measured span. Completion derives the projection angles.
 """
 from __future__ import annotations
 
@@ -33,9 +40,11 @@ _START_SCAN = re.compile(r"\bstart\s+scan\b", re.IGNORECASE)
 _ASSIGNMENT = re.compile(r"^\s*([A-Za-z][\w ]*?)\s*[:=]\s*(.*?)\s*$")
 _QUANTITY = re.compile(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(.*?)")
 _LENGTH_TO_UM = {"um": 1.0, "mm": 1000.0, "nm": 0.001, "m": 1_000_000.0}
+_ACQUISITION_NAME = re.compile(r"(?P<prefix>.+)_(?P<sequence>\d+)_(?:img|ref)\.tiff?")
 
 # Bare-length convention inferred for the supplied log profile; registry unit is um.
 EFF_PIX_UNIT: str | None = "mm"
+DEFAULT_ANGLE_SPAN = 360.0
 
 
 class DesyMetadataWarning(UserWarning):
@@ -156,6 +165,42 @@ def _natural_key(path: Path):
                  for part in re.split(r"(\d+)", path.name))
 
 
+def _first_flat_batch(projections: list[Path], flats: list[Path]) -> tuple[list[Path], str]:
+    """Prefer pre-scan refs; use post-scan refs when they are the only batch."""
+    if not projections or not flats:
+        raise ValueError("DESY needs projections and references to identify the first flat batch")
+    prefixes, seen = set(), set()
+    sequences = {}
+    for files in (projections, flats):
+        if files != sorted(files, key=_natural_key):
+            raise ValueError("DESY TIFF filenames do not sort in numeric order; use zero-padded sequence numbers")
+        for path in files:
+            match = _ACQUISITION_NAME.fullmatch(path.name)
+            if match is None:
+                raise ValueError(f"DESY cannot identify acquisition sequence in {path.name!r}; expected <scan>_<number>_img/ref.tif[f]")
+            prefixes.add(match["prefix"])
+            sequence = int(match["sequence"])
+            if sequence in seen:
+                raise ValueError("DESY repeated acquisition number across images/references; cannot safely identify the first flat batch")
+            seen.add(sequence)
+            sequences[path] = sequence
+    if len(prefixes) != 1:
+        raise ValueError("DESY projections and references must share one scan prefix to identify the first flat batch")
+    first = min(sequences[path] for path in projections)
+    last = max(sequences[path] for path in projections)
+    if any(first <= sequences[path] <= last for path in flats):
+        raise ValueError("DESY references occur within the projection sequence; expected batches before and/or after the scan")
+    selected = [path for path in flats if sequences[path] < first]
+    batch = "pre_scan"
+    if not selected:
+        selected = flats
+        batch = "post_scan"
+    # The backend applies a slice to its lexically sorted file list.
+    if selected != flats[:len(selected)]:
+        raise ValueError("DESY first flat batch is not a leading range in backend file order")
+    return selected, batch
+
+
 class DesyTiffSignature(TiffSignature):
     """Identify this folder convention, not every experiment at DESY."""
 
@@ -187,8 +232,12 @@ class DesyTiffPlugin(ImportPlugin):
     def get_path_map(self, handle) -> PathMap:
         folder = Path(handle)
         hdf5, beamline, log = _sidecars(folder)
+        first_flats, _ = _first_flat_batch(
+            _image_files(folder, _PROJECTIONS), _image_files(folder, _FLATS),
+        )
         return PathMap(
             projections=_PROJECTIONS, flats=_FLATS, darks=_DARKS,
+            flats_range=slice(0, len(first_flats)),
             metadata_source=log.name,
             extra={"hdf5_sidecar": hdf5.name, "beamline_name": beamline},
         )
@@ -201,11 +250,23 @@ class DesyTiffPlugin(ImportPlugin):
         bundle = MetadataBundle()
         notes: list[str] = []
         counts = {}
+        available_counts = {}
+        first_flats, flat_batch = _first_flat_batch(
+            _image_files(folder, path_map.projections or _PROJECTIONS),
+            _image_files(folder, path_map.flats or _FLATS),
+        )
+        if path_map.flats_range != slice(0, len(first_flats)):
+            raise ValueError("DESY flat selection differs from the path map; rebuild it with get_path_map()")
+        excluded_flats = []
         for key in ("projections", "flats", "darks"):
             pattern = getattr(path_map, key)
             if not pattern:
                 raise ValueError(f"DESY missing {key} pattern")
             files = _image_files(folder, pattern)
+            available_counts[key] = len(files)
+            if key == "flats":
+                excluded_flats = files[len(first_flats):]
+                files = first_flats
             counts[key] = len(files)
             if files:
                 bundle.set(f"{key}_path", pattern, tier="mandatory_hard")
@@ -227,8 +288,16 @@ class DesyTiffPlugin(ImportPlugin):
 
         bundle.set("desy_log_text", raw_log, tier="optional")
         bundle.set("desy_log_fields", fields, tier="optional")
+        # Keep raw values and units, including fields unused by reconstruction.
+        for key, value in fields.items():
+            bundle.set(f"desy_log_value_{key}", value, tier="optional")
         bundle.set("desy_image_counts", counts, tier="optional", source="computed")
-        bundle.set("desy_flat_reference_policy", "all reference frames pooled", tier="optional", source="computed")
+        bundle.set("desy_available_image_counts", available_counts, tier="optional", source="computed")
+        bundle.set("desy_flat_reference_policy", "prefer pre-scan batch; use post-scan batch if it is the only batch; normal flat-stack preprocessing", tier="optional", source="computed")
+        bundle.set("desy_selected_flat_batch", flat_batch, tier="optional", source="computed")
+        bundle.set("desy_selected_flat_files", [p.name for p in first_flats], tier="optional", source="computed")
+        bundle.set("desy_excluded_flat_files", [p.name for p in excluded_flats], tier="optional", source="computed")
+        bundle.set("desy_flat_file_range", (0, len(first_flats)), tier="optional", source="computed")
         if path_map.extra.get("beamline_name"):
             bundle.set("instrument_name", path_map.extra["beamline_name"], tier="optional")
         if path_map.extra.get("hdf5_sidecar"):
@@ -255,8 +324,8 @@ class DesyTiffPlugin(ImportPlugin):
             notes.append(f"n_dark={declared['n_dark']}, actual dark files={counts['darks']}")
         if declared["n_ref"] is not None and declared["n_ref"] != counts["flats"]:
             notes.append(
-                f"n_ref={declared['n_ref']}, actual reference files={counts['flats']}; "
-                "n_ref may describe one batch. All reference files are included."
+                f"n_ref={declared['n_ref']}, selected {flat_batch} references={counts['flats']}, "
+                f"all reference files={available_counts['flats']}; check selected-batch completeness and n_ref meaning."
             )
 
         # Angular counts do not specify scan coverage. Only read an explicit span.
@@ -266,6 +335,9 @@ class DesyTiffPlugin(ImportPlugin):
             if value <= 0 or unit not in {"", "deg", "degree", "degrees", "°"}:
                 raise ValueError("DESY angle_span must be positive and expressed in degrees")
             bundle.set("angle_span", value, tier="mandatory_soft")
+        else:
+            bundle.set("angle_span", DEFAULT_ANGLE_SPAN, tier="mandatory_soft", source="default")
+            notes.append("No angle_span in the log; assuming 360 degrees. Edit the span if needed.")
 
         pixel = _quantity(fields, "eff_pix")
         if pixel is not None:

@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 gui_samples/
 tomo_project.egg-info/
+tests_geet/

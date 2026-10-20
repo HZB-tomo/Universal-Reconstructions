@@ -260,7 +260,8 @@ class BasicSettingsTab(QWidget):
         # logic as angle_span_spin above, driven by source instead of
         # presence since voxel_size always resolves to *something*
         # (core/known_fields.py's default=1.0), never genuinely missing.
-        self.pixel_size_spin.setEnabled(not pixel_size_derived)
+        #self.pixel_size_spin.setEnabled(not pixel_size_derived) 
+        self.pixel_size_spin.setEnabled(True)   ###makes editing the pixel size possible if it was also derived from the file
         self.pixel_size_spin.setToolTip(
             "Read from this project's own recorded pixel size. Read-only."
             if pixel_size_derived
@@ -736,7 +737,7 @@ class AdjustmentPanel(QWidget):
 
         n_angles, n_rows, width = 0, 1, 0
         geometry_type = ""
-        angle_span = 180.0  # the common case (a half-turn scan); overridden below if known
+        angle_span = 360.0  # the common case (a half-turn scan); overridden below if known
         angle_span_derived = False  # True once a real, already-known value is shown (read-only)
         pixel_size = 1.0  # core/known_fields.py's voxel_size default; overridden below if known
         pixel_size_derived = False  # True only when source == "file" -- a real, measured value
@@ -747,7 +748,11 @@ class AdjustmentPanel(QWidget):
             resolved_span = di.get_metadata("angle_span")
             if resolved_span is not None:
                 angle_span = resolved_span
-                angle_span_derived = True
+                #angle_span_derived = True   ##here I commented this out to make the angle span editable even if it was derived from the file
+                angle_span_derived = (
+                    di.get_metadata_source("angles") is not None
+                    and di.get_metadata_source("angles") != "derived"
+                )
             resolved_pixel_size = di.get_metadata("voxel_size")
             if resolved_pixel_size is not None:
                 pixel_size = resolved_pixel_size

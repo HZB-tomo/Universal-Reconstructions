@@ -107,5 +107,12 @@ def provide(project: ProjectObject, key: str, value: Any) -> None:
     if key not in KNOWN_FIELDS:
         raise ValueError(f"Unknown field '{key}'. Add it to core/known_fields.py first")
 
+    ## this is for when we get angles  from metadata, but we still keep it changeable 
+
+    if key in {"angle_span", "rotation_direction"}:
+        angles = project.metadata.get_field("angles")
+        if angles is not None and angles.source == "derived":
+            project.metadata.declare_missing("angles", tier=KNOWN_FIELDS["angles"].tier)
+
     project.metadata.set(key, value, tier=KNOWN_FIELDS[key].tier, source="user")
     run(project)
