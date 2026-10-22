@@ -56,11 +56,41 @@ def make_plan(n_angles: int, n_rows: int, width: int, geometry_type: Optional[st
     )
 
 
+def rows_for_export(export_rows: Optional[tuple[int, int]], n_rows: int) -> tuple[Optional[slice], int]:
+    """
+    Save settings' From/To slice (both inclusive, ProjectSession.export_rows)
+    as (config.rows, number of slices). None means every row.
+    """
+    if export_rows is None or export_rows == (0, n_rows - 1):
+        return None, n_rows
+    start, end = max(0, export_rows[0]), min(n_rows - 1, export_rows[1])
+    return slice(start, end + 1), max(end - start + 1, 0)
+
+
+def describe_run(config: ProjectConfig, n_rows_total: int, n_selected: int) -> str:
+    """The 'what will be reconstructed' lines of the destination dialog."""
+    rows = config.rows
+    if rows is None:
+        slices = f"Slices: all {n_rows_total}"
+    else:
+        first, last, _ = rows.indices(n_rows_total)
+        slices = f"Slices: {first} to {last - 1} ({n_selected} of {n_rows_total})"
+    if config.dtype == "uint16" and (config.dtype_clip_min is None or config.dtype_clip_max is None):
+        output = (
+            "Output: uint16 in memory (scaled to the volume's own range); an HDF5 file is written as float32 "
+            "unless Clip min/max are set in Save settings"
+        )
+    else:
+        output = f"Output: {config.dtype}"
+    return f"{slices}\n{output}"
+
+
 def streaming_config(config: ProjectConfig, path: str) -> tuple[ProjectConfig, str]:
     """
-    A copy of `config` set up to stream the whole volume into the HDF5
-    file at `path`. Returns (config, note); `note` is non-empty when a
-    setting had to change. A uint16 export without explicit clip bounds
+    A copy of `config` set up to stream into the HDF5 file at `path`:
+    config.rows (the Save settings slice range, set by the caller) and
+    config.dtype are kept; crop is not applied. Returns (config, note);
+    `note` is non-empty when a setting had to change. A uint16 export without explicit clip bounds
     can't stream (there's no whole-volume min/max to discover a chunk
     at a time), so it is written as float32 instead.
     """
@@ -70,7 +100,7 @@ def streaming_config(config: ProjectConfig, path: str) -> tuple[ProjectConfig, s
         dtype = "float32"
         note = "written as float32 (uint16 needs Clip min/max set in Save settings to stream)"
     return replace(
-        config, rows=None, crop=None, stream=True, export_format="hdf5", export_path=str(path), dtype=dtype,
+        config, crop=None, stream=True, export_format="hdf5", export_path=str(path), dtype=dtype,
     ), note
 
 

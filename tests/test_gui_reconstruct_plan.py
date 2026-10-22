@@ -62,7 +62,7 @@ def test_streaming_only_for_parallel_geometry(monkeypatch):
 def test_streaming_config_forces_full_hdf5_stream_without_touching_the_original():
     config = ProjectConfig(path="a.h5", rows=slice(5, 9), crop=((0, 4), (0, 2), (0, 2)), export_format="tiff")
     streamed, note = streaming_config(config, "out/vol.h5")
-    assert streamed.stream and streamed.rows is None and streamed.crop is None
+    assert streamed.stream and streamed.rows == slice(5, 9) and streamed.crop is None  # slice range kept, crop not applied
     assert streamed.export_format == "hdf5" and streamed.export_path == "out/vol.h5"
     assert note == ""
     assert not config.stream and config.rows == slice(5, 9) and config.export_format == "tiff"
@@ -189,7 +189,7 @@ def test_eager_run_with_progress_reports_slices_and_matches_the_unchunked_result
         shape=(8, 32, 32), n_angles=60, cor_deviation=0.0, tilt_deg=0.0,
         n_scratches=0, n_defective_pixels=0, inhomogeneity_strength=0.0, noise_level=0.0, seed=1,
     ), source)
-    monkeypatch.setattr(ram_check, "estimate_chunk_rows", lambda width, max_rows: 2)
+    monkeypatch.setattr(ram_check, "estimate_chunk_rows", lambda width, max_rows, *rest: 2)
 
     def run(progress, name):
         config = ProjectConfig(path=str(source), format="hdf5", center=16.0, tilt_deg=0.0, export_path=str(tmp_path / name))
@@ -204,8 +204,8 @@ def test_eager_run_with_progress_reports_slices_and_matches_the_unchunked_result
     plain_repeat = run(None, "c.h5")  # algotom's FBP isn't bit-deterministic; see tests/test_streaming.py
     assert [e.done for e in events if e.stage == "Reconstructing"] == [0, 2, 4, 6, 8]
     assert chunked.shape == plain.shape == (8, 32, 32)
-    corr = lambda a, b: np.corrcoef(a.ravel(), b.ravel())[0, 1]
-    assert corr(chunked, plain) >= corr(plain, plain_repeat) - 0.03
+    np.testing.assert_array_equal(plain, plain_repeat)  # CPU FBP is exactly reproducible now
+    np.testing.assert_allclose(chunked, plain, rtol=1e-5, atol=1e-6)  # chunking changes nothing
 
 
 def test_unique_path_never_overwrites(tmp_path):
@@ -237,3 +237,144 @@ def test_section_index_matches_numpy_slicing_on_every_axis():
     for axis, expected in ((0, a[1]), (1, a[:, 1, :]), (2, a[:, :, 1])):
         np.testing.assert_array_equal(a[section_index(axis, 1)], expected)
     assert axis_labels(1) == ("z", "x") and axis_labels(2) == ("z", "y")
+
+
+def test_rows_for_export_turns_the_inclusive_save_range_into_a_slice():
+    assert reconstruct_plan.rows_for_export(None, 100) == (None, 100)
+    assert reconstruct_plan.rows_for_export((0, 99), 100) == (None, 100)
+    assert reconstruct_plan.rows_for_export((10, 19), 100) == (slice(10, 20), 10)
+    assert reconstruct_plan.rows_for_export((-5, 500), 100) == (None, 100) or reconstruct_plan.rows_for_export((-5, 500), 100) == (slice(0, 100), 100)
+    assert reconstruct_plan.rows_for_export((30, 20), 100)[1] == 0  # empty range is reported, not hidden
+
+
+def test_describe_run_mentions_range_and_output_type():
+    all_rows = reconstruct_plan.describe_run(ProjectConfig(path="a"), 100, 100)
+    assert "all 100" in all_rows and "Output: float32" in all_rows
+    some = reconstruct_plan.describe_run(ProjectConfig(path="a", rows=slice(10, 20), dtype="uint16", dtype_clip_min=0.0, dtype_clip_max=1.0), 100, 10)
+    assert "10 to 19 (10 of 100)" in some and "Output: uint16" in some
+    unclipped = reconstruct_plan.describe_run(ProjectConfig(path="a", dtype="uint16"), 100, 100)
+    assert "float32" in unclipped and "Clip min/max" in unclipped
+
+
+def test_output_type_defaults_to_float32():
+    assert ProjectConfig(path="a").dtype == "float32"
+
+
+def test_streaming_a_selected_slice_range_writes_only_those_slices(tmp_path):
+    pytest.importorskip("algotom")
+    from tests.fixtures.realistic_phantom import generate as generate_phantom
+    from tests.fixtures.realistic_phantom import write_hdf5
+
+    source = tmp_path / "scan.h5"
+    write_hdf5(generate_phantom(
+        shape=(10, 32, 32), n_angles=60, cor_deviation=0.0, tilt_deg=0.0,
+        n_scratches=0, n_defective_pixels=0, inhomogeneity_strength=0.0, noise_level=0.0, seed=1,
+    ), source)
+    rows, n = reconstruct_plan.rows_for_export((3, 6), 10)
+    base = ProjectConfig(path=str(source), format="hdf5", storage_mode="disk", center=16.0, tilt_deg=0.0, rows=rows)
+    run = PipelineRun(base)
+    run.import_data()
+    run.complete()
+    config, _ = streaming_config(base, str(tmp_path / "sub.h5"))
+    streamer = PipelineRun(config)
+    streamer.project = run.project
+    with h5py.File(streamer.stream(), "r") as f:
+        assert f["/volume"].shape == (4, 32, 32) and n == 4 and f["/volume"].dtype == np.float32
+
+    uint_config, note = streaming_config(
+        ProjectConfig(path=str(source), format="hdf5", center=16.0, tilt_deg=0.0, rows=rows, dtype="uint16",
+                      dtype_clip_min=0.0, dtype_clip_max=0.1), str(tmp_path / "u16.h5"))
+    streamer = PipelineRun(uint_config)
+    streamer.project = run.project
+    with h5py.File(streamer.stream(), "r") as f:
+        assert f["/volume"].shape == (4, 32, 32) and f["/volume"].dtype == np.uint16 and note == ""
+
+
+# -- speed / time remaining -------------------------------------------------------
+
+
+class _Clock:
+    def __init__(self):
+        self.t = 100.0
+
+    def __call__(self):
+        return self.t
+
+
+def _tracker():
+    from gui.progress_stats import ProgressTracker
+
+    clock = _Clock()
+    return ProgressTracker(clock), clock
+
+
+def _event(done, total=100, stage="Reconstructing", project="p"):
+    from orchestration import ProgressEvent
+
+    return ProgressEvent(project, stage, done, total)
+
+
+def test_speed_and_time_remaining_follow_the_slices_done():
+    tracker, clock = _tracker()
+    assert tracker.update(_event(0)).speed is None  # nothing measurable yet
+    clock.t += 5.0
+    stats = tracker.update(_event(10))
+    assert stats.speed == pytest.approx(2.0)
+    assert stats.remaining_s == pytest.approx(45.0)  # 90 slices left at 2 per second
+    assert stats.elapsed_s == pytest.approx(5.0) and not stats.finished
+
+
+def test_speed_tracks_recent_progress_not_the_whole_run():
+    tracker, clock = _tracker()
+    tracker.update(_event(0))
+    for done in range(10, 100, 10):  # fast start: 10 slices per second
+        clock.t += 1.0
+        tracker.update(_event(done))
+    for done in range(100, 160, 10):  # then it slows to 1 slice per second
+        clock.t += 10.0
+        stats = tracker.update(_event(done, total=200))
+    assert stats.speed == pytest.approx(1.0)
+
+
+def test_repeated_events_at_the_same_count_do_not_flatten_the_speed():
+    tracker, clock = _tracker()
+    tracker.update(_event(0))
+    clock.t += 2.0
+    tracker.update(_event(4))
+    for stage in ("Normalizing projections", "Reconstructing", "Writing"):
+        clock.t += 1.0
+        stats = tracker.update(_event(4, stage=stage))
+    clock.t += 1.0
+    stats = tracker.update(_event(8))
+    assert stats.speed == pytest.approx(8 / 6.0)  # 8 slices over the 6 seconds that passed
+    # (the repeated-count events carry no new information and are not samples)
+
+
+def test_finished_run_reports_total_time_and_average_speed():
+    tracker, clock = _tracker()
+    tracker.update(_event(0, total=50))
+    clock.t += 25.0
+    stats = tracker.update(_event(50, total=50, stage="Done"))
+    assert stats.finished and stats.elapsed_s == pytest.approx(25.0)
+    assert stats.average_speed == pytest.approx(2.0) and stats.remaining_s is None
+    clock.t += 1000.0
+    assert tracker.stats().elapsed_s == pytest.approx(25.0)  # a finished run's length stays fixed
+
+
+def test_a_new_run_starts_the_timer_over():
+    tracker, clock = _tracker()
+    tracker.update(_event(0, total=10))
+    clock.t += 10.0
+    tracker.update(_event(10, total=10, stage="Done"))
+    clock.t += 500.0
+    stats = tracker.update(_event(0, total=10, project="other"))
+    assert stats.elapsed_s == 0.0 and not stats.finished and stats.speed is None
+
+
+def test_format_duration():
+    from gui.progress_stats import format_duration
+
+    assert format_duration(3.14) == "3.1 s"
+    assert format_duration(65) == "1 min 05 s"
+    assert format_duration(3725) == "1 h 02 min 05 s"
+    assert format_duration(-1) == "0.0 s"

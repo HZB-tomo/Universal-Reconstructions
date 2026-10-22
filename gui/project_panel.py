@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -96,6 +96,7 @@ class ProjectPanel(QWidget):
     settings_pasted = Signal(list)  # list[ProjectSession] just pasted onto, for MainWindow to refresh if one was open
     config_exported = Signal(list)  # list[ProjectSession] whose config .ini was just written
     save_requested = Signal(list)  # list[ProjectSession] whose in-memory reconstruction should be saved, see MainWindow._save_sessions()
+    import_requested = Signal(str)  # "disk" or "ram": the empty area was double-clicked / right-click > Import
     reconstruction_opened = Signal(object)  # ProjectSession whose "Reconstructed" row was double-clicked
 
     def __init__(self, parent=None):
@@ -111,6 +112,7 @@ class ProjectPanel(QWidget):
         self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.tree.customContextMenuRequested.connect(self._on_context_menu_requested)
+        self.tree.viewport().installEventFilter(self)  # double-click on empty space -> import
 
         self.reconstruct_selected_btn = QPushButton("Reconstruct selected", self)
         self.reconstruct_selected_btn.clicked.connect(self.reconstruct_selected_requested)
@@ -127,6 +129,19 @@ class ProjectPanel(QWidget):
         layout.addLayout(buttons)
         self.status_box = StatusBox(self)  # always visible; fed by MainWindow from the pipeline's progress events
         layout.addWidget(self.status_box)
+
+    def eventFilter(self, watched, event) -> bool:
+        # QTreeWidget only reports double-clicks that land on an item; a
+        # double-click on the empty area below the rows is the shortcut for
+        # "Import..." (from disk).
+        if (
+            watched is self.tree.viewport()
+            and event.type() == QEvent.MouseButtonDblClick
+            and self.tree.itemAt(event.position().toPoint()) is None
+        ):
+            self.import_requested.emit("disk")
+            return True
+        return super().eventFilter(watched, event)
 
     def add_session(self, session: ProjectSession) -> None:
         item = QTreeWidgetItem([session.project_id, ""])
@@ -197,6 +212,7 @@ class ProjectPanel(QWidget):
     def _on_context_menu_requested(self, pos) -> None:
         item = self.tree.itemAt(pos)
         if item is None:
+            self._build_import_menu().exec(self.tree.viewport().mapToGlobal(pos))
             return
         top_level = item.parent() or item
         if top_level not in self.tree.selectedItems():
@@ -209,6 +225,13 @@ class ProjectPanel(QWidget):
 
         menu = self._build_context_menu(sessions)
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _build_import_menu(self) -> QMenu:
+        """Right-click on the empty area below the project rows."""
+        menu = QMenu(self)
+        menu.addAction("Import project...", lambda: self.import_requested.emit("disk"))
+        menu.addAction("Import project to RAM...", lambda: self.import_requested.emit("ram"))
+        return menu
 
     def _build_context_menu(self, sessions: list[ProjectSession]) -> QMenu:
         menu = QMenu(self)

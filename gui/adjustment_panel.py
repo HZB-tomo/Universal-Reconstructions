@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import Signal
+import copy
+import threading
+
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -22,6 +25,8 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -30,15 +35,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from calibration import find_center, find_tilt, half_scan_slice
+from calibration import find_tilt, half_scan_slice, search_center
 from core.data_interface import DataInterface
 from orchestration import PipelineRun, ProgressEvent, load_config, save_config
 from preprocessing import build_reference, normalize_slice
-from reconstruction import get_backend, resolve_device
+from reconstruction import get_backend, resolve_device, to_uint16
 
 from orchestration import ram_check
+from gui.preview_engine import PreviewEngine
 from gui.reconstruct_dialog import ReconstructDestinationDialog
-from gui.reconstruct_plan import RememberedPaths, describe_error, make_plan, streaming_config
+from gui.reconstruct_plan import RememberedPaths, describe_error, describe_run, make_plan, rows_for_export, streaming_config
 from gui.session import ProjectSession
 from gui.viewer import ImageViewer
 from gui.workers import ProgressRelay, run_in_background
@@ -74,6 +80,7 @@ class BasicSettingsTab(QWidget):
     device_changed = Signal(object)  # None ("auto"), "cpu", or "gpu" -- see _DEVICE_CHOICES
     num_iter_changed = Signal(int)
     center_changed = Signal(float)
+    auto_update_toggled = Signal(bool)
     tilt_changed = Signal(float)
     rotate_changed = Signal(float)
     load_config_requested = Signal()
@@ -158,7 +165,19 @@ class BasicSettingsTab(QWidget):
         self.center_spin = QDoubleSpinBox(self)
         self.center_spin.setRange(-100000.0, 100000.0)
         self.center_spin.setDecimals(2)
+        self.center_spin.setSingleStep(0.5)  # one mouse-wheel notch / arrow press
         self.center_spin.valueChanged.connect(self.center_changed)
+
+        # With this on, every change of the center (mouse wheel, typing,
+        # picking a candidate) previews the slice again after a short
+        # pause; previews already computed come back instantly.
+        self.auto_update_checkbox = QCheckBox("Auto-update preview", self)
+        self.auto_update_checkbox.setToolTip(
+            "Reconstruct the preview slice again whenever the center of rotation changes. "
+            "Results are remembered, so going back to a center you already tried is instant, "
+            "and nearby centers are computed in the background."
+        )
+        self.auto_update_checkbox.toggled.connect(self.auto_update_toggled)
 
         self.tilt_spin = QDoubleSpinBox(self)
         self.tilt_spin.setRange(-3.0, 3.0)  # real tilt is within about 1 degree; see MAX_PLAUSIBLE_TILT_DEG
@@ -226,6 +245,7 @@ class BasicSettingsTab(QWidget):
         form.addRow(self.num_iter_label, self.num_iter_spin)
         form.addRow("Device", self.device_combo)
         form.addRow("Center of rotation", self.center_spin)
+        form.addRow("", self.auto_update_checkbox)
         form.addRow("Tilt (deg)", self.tilt_spin)
         form.addRow("Rotate (deg)", self.rotate_spin)
 
@@ -326,20 +346,106 @@ class BasicSettingsTab(QWidget):
 
 
 class AutomaticAdjustmentsTab(QWidget):
-    find_cor_requested = Signal()
+    """
+    Center-of-rotation search and tilt. The search can run fully automatic,
+    or be steered with a guess and a tolerance (search window = guess +/-
+    tolerance); it always lists the best few candidates, so when the first
+    answer is wrong the next ones are one click away.
+    """
+
+    find_cor_requested = Signal(object, object)  # guess (float | None), tolerance (float | None)
+    candidate_chosen = Signal(float)
+    use_current_center_requested = Signal()
     find_tilt_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        find_cor_btn = QPushButton("Find center of rotation", self)
-        find_cor_btn.clicked.connect(self.find_cor_requested)
+
+        # "auto" is the special value at the minimum: no guess / no tolerance.
+        self.guess_spin = QDoubleSpinBox(self)
+        self.guess_spin.setRange(-1.0, 100000.0)
+        self.guess_spin.setDecimals(1)
+        self.guess_spin.setSpecialValueText("auto")
+        self.guess_spin.setValue(-1.0)
+        self.guess_spin.setToolTip(
+            "Where you think the center of rotation is, in detector columns. 'auto' searches the middle "
+            "half of the detector. Use the arrows or type a value to set a guess."
+        )
+
+        self.tolerance_spin = QDoubleSpinBox(self)
+        self.tolerance_spin.setRange(0.0, 100000.0)
+        self.tolerance_spin.setDecimals(1)
+        self.tolerance_spin.setSuffix(" px")
+        self.tolerance_spin.setSpecialValueText("auto")
+        self.tolerance_spin.setToolTip(
+            "How far from the guess to look (+/-). 'auto' is a tenth of the detector width around a guess."
+        )
+
+        use_current_btn = QPushButton("Use current center", self)
+        use_current_btn.setToolTip("Copy the center of rotation currently set in Basic settings into the guess.")
+        use_current_btn.clicked.connect(self.use_current_center_requested)
+
+        self.find_cor_btn = QPushButton("Find center of rotation", self)
+        self.find_cor_btn.clicked.connect(self._emit_find_cor)
+
+        self.candidates_list = QListWidget(self)
+        self.candidates_list.setMaximumHeight(110)
+        self.candidates_list.setToolTip("Click a candidate to use it and preview it.")
+        self.candidates_list.itemClicked.connect(self._on_candidate_clicked)
+        self.search_note = QLabel("", self)
+        self.search_note.setWordWrap(True)
+
         find_tilt_btn = QPushButton("Find tilt", self)
         find_tilt_btn.clicked.connect(self.find_tilt_requested)
 
+        form = QFormLayout()
+        form.addRow("Guess", self.guess_spin)
+        form.addRow("Search +/-", self.tolerance_spin)
+
         layout = QVBoxLayout(self)
-        layout.addWidget(find_cor_btn)
+        layout.addLayout(form)
+        layout.addWidget(use_current_btn)
+        layout.addWidget(self.find_cor_btn)
+        layout.addWidget(QLabel("Candidates (best first):", self))
+        layout.addWidget(self.candidates_list)
+        layout.addWidget(self.search_note)
+        layout.addSpacing(12)
         layout.addWidget(find_tilt_btn)
         layout.addStretch()
+
+    def guess(self) -> Optional[float]:
+        return None if self.guess_spin.value() < 0 else self.guess_spin.value()
+
+    def tolerance(self) -> Optional[float]:
+        return None if self.tolerance_spin.value() <= 0 else self.tolerance_spin.value()
+
+    def _emit_find_cor(self) -> None:
+        self.find_cor_requested.emit(self.guess(), self.tolerance())
+
+    def _on_candidate_clicked(self, item: QListWidgetItem) -> None:
+        self.candidate_chosen.emit(float(item.data(Qt.UserRole)))
+
+    def set_guess(self, value: Optional[float]) -> None:
+        self.guess_spin.setValue(-1.0 if value is None else value)
+
+    def set_values(self, guess: Optional[float], tolerance: Optional[float], candidates: list, note: str = "") -> None:
+        for spin, value in ((self.guess_spin, -1.0 if guess is None else guess), (self.tolerance_spin, tolerance or 0.0)):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+        self.set_candidates(candidates, note)
+
+    def set_candidates(self, candidates: list, note: str = "") -> None:
+        """`candidates`: [(center, score), ...] best first (score NaN = unknown)."""
+        self.candidates_list.clear()
+        for center, score in candidates:
+            label = f"{center:.2f}" if score != score else f"{center:.2f}    match {score:.2f}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, float(center))
+            self.candidates_list.addItem(item)
+        if candidates:
+            self.candidates_list.setCurrentRow(0)
+        self.search_note.setText(note)
 
 
 class RefinementsTab(QWidget):
@@ -738,6 +844,11 @@ class AdjustmentPanel(QWidget):
         self.basic_tab.export_config_requested.connect(self._export_config)
         self.basic_tab.export_config_as_requested.connect(self._export_config_as)
         self.auto_tab.find_cor_requested.connect(self._find_cor)
+        self.auto_tab.candidate_chosen.connect(self._on_candidate_chosen)
+        self.auto_tab.use_current_center_requested.connect(self._use_current_center_as_guess)
+        self.auto_tab.guess_spin.valueChanged.connect(self._on_guess_changed)
+        self.auto_tab.tolerance_spin.valueChanged.connect(self._on_tolerance_changed)
+        self.basic_tab.auto_update_toggled.connect(self._on_auto_update_toggled)
         self.auto_tab.find_tilt_requested.connect(self._find_tilt)
         self.save_tab.changed.connect(self._on_save_settings_changed)
         self.save_tab.clip_min_changed.connect(self._on_clip_min_changed)
@@ -757,11 +868,25 @@ class AdjustmentPanel(QWidget):
         # open, same as the viewer's own displayed frame.
         self._last_preview_volume: Optional[np.ndarray] = None
 
+        # Single-slice previews with memory (see gui/preview_engine.py): every
+        # preview image is kept, so scrubbing the center back and forth is
+        # instant, and neighbouring centers are computed in the background.
+        self.engine = PreviewEngine()
+        self._auto_update = False
+        self._preview_inflight = False
+        self._preview_pending = False
+        self._prefetch_cancel = threading.Event()
+        self._auto_update_timer = QTimer(self)
+        self._auto_update_timer.setSingleShot(True)
+        self._auto_update_timer.setInterval(120)  # lets a burst of wheel notches settle
+        self._auto_update_timer.timeout.connect(lambda: self._reconstruct(all_slices=False))
+
         self.set_session(None)
 
     # -- session binding ----------------------------------------------------
 
     def set_session(self, session: Optional[ProjectSession]) -> None:
+        self._prefetch_cancel.set()  # background previews belong to the previous project
         self.session = session
         enabled = session is not None
         self.tabs.setEnabled(enabled)
@@ -863,6 +988,7 @@ class AdjustmentPanel(QWidget):
             width=width,
         )
         self.viewer.set_crop_rect(session.export_crop_yx)
+        self.auto_tab.set_values(session.cor_guess, session.cor_tolerance, session.cor_candidates)
 
     # -- basic settings edits ------------------------------------------------
 
@@ -906,6 +1032,35 @@ class AdjustmentPanel(QWidget):
         if self.session is not None:
             self.session.config.center = value
             self.session_changed.emit(self.session)
+            if self._auto_update and self.session.imported:
+                self._auto_update_timer.start()  # restarts the pause if the wheel is still turning
+
+    def _on_auto_update_toggled(self, checked: bool) -> None:
+        self._auto_update = checked
+        if checked and self.session is not None and self.session.imported:
+            self._reconstruct(all_slices=False)
+
+    def _on_guess_changed(self, _value: float) -> None:
+        if self.session is not None:
+            self.session.cor_guess = self.auto_tab.guess()
+
+    def _on_tolerance_changed(self, _value: float) -> None:
+        if self.session is not None:
+            self.session.cor_tolerance = self.auto_tab.tolerance()
+
+    def _use_current_center_as_guess(self) -> None:
+        if self.session is not None and self.session.config.center is not None:
+            self.auto_tab.set_guess(round(self.session.config.center, 1))
+
+    def _on_candidate_chosen(self, center: float) -> None:
+        """A candidate was clicked: make it the center (Basic settings
+        follows) and preview it -- instantly if it was already computed."""
+        if self.session is None:
+            return
+        self.session.config.center = center
+        self.basic_tab.set_center(center)
+        self.session_changed.emit(self.session)
+        self._reconstruct(all_slices=False)
 
     def _on_tilt_changed(self, value: float) -> None:
         if self.session is not None:
@@ -1053,13 +1208,20 @@ class AdjustmentPanel(QWidget):
 
     # -- automatic adjustments ------------------------------------------------
 
-    def _find_cor(self) -> None:
+    def _find_cor(self, guess: Optional[float] = None, tolerance: Optional[float] = None) -> None:
+        """
+        Searches for the center of rotation on the middle row. `guess` and
+        `tolerance` (both None = fully automatic) steer where it looks; the
+        best few candidates are listed in the tab, the winner is applied and
+        previewed, and the candidates are computed in the background so
+        trying each of them afterwards is instant.
+        """
         session = self.session
         if session is None or not session.imported:
             self.status_message.emit("open and import the project before calibrating")
             return
 
-        def work() -> float:
+        def work():
             project = session.run.project
             reference = build_reference(
                 project, reducer=session.config.reference_reducer, dark_offset=session.config.dark_offset,
@@ -1069,26 +1231,44 @@ class AdjustmentPanel(QWidget):
             middle_row = n_rows // 2
             sinogram = normalize_slice(project, middle_row, reference)
             half = half_scan_slice(DataInterface(project).get_metadata("angles"))
-            return find_center(sinogram[half], backend=session.config.calibration_backend)
+            return search_center(
+                sinogram[half], backend=session.config.calibration_backend, guess=guess, tolerance=tolerance,
+            )
 
-        def done(center: float) -> None:
+        def done(result) -> None:
             self.busy_changed.emit(False)
-            session.config.center = center
-            self.basic_tab.set_center(center)
+            self.auto_tab.find_cor_btn.setEnabled(True)
+            session.cor_candidates = [(c.center, c.score) for c in result.candidates]
+            session.config.center = result.best
+            self.basic_tab.set_center(result.best)
             width = DataInterface(session.run.project).shape_of("projections")[2]
-            offset_fraction = abs(center - width / 2.0) / width
-            message = f"found center of rotation: {center:.2f} ({offset_fraction:.1%} of width from image center)"
+            offset_fraction = abs(result.best - width / 2.0) / width
+            message = f"found center of rotation: {result.best:.2f} ({offset_fraction:.1%} of width from image center)"
+            note = f"searched {result.start:.0f} to {result.stop:.0f}"
             if offset_fraction > MAX_PLAUSIBLE_COR_OFFSET_FRACTION:
                 message += " -- further off-center than usual, double check"
+            if result.at_edge:
+                warning = (
+                    "the best match is at the edge of the search window, so the true center may lie outside it -- "
+                    "widen 'Search +/-' or change the guess"
+                )
+                message += " -- " + warning
+                note += ". Warning: " + warning
+            elif len(result.candidates) > 1 and result.candidates[1].score > 0.8:
+                message += f" -- another candidate ({result.candidates[1].center:.1f}) scores almost as well, check the list"
+            self.auto_tab.set_candidates(session.cor_candidates, note)
             self.status_message.emit(message)
             self.session_changed.emit(session)
             self._reconstruct(all_slices=False)
+            self._schedule_prefetch([c.center for c in result.candidates[1:]])
 
         def failed(exc: Exception) -> None:
             self.busy_changed.emit(False)
+            self.auto_tab.find_cor_btn.setEnabled(True)
             self.status_message.emit(f"find center of rotation failed: {exc}")
 
         self.busy_changed.emit(True)
+        self.auto_tab.find_cor_btn.setEnabled(False)
         self._workers.append(run_in_background(work, on_finished=done, on_failed=failed))
 
     def _find_tilt(self) -> None:
@@ -1136,20 +1316,30 @@ class AdjustmentPanel(QWidget):
         if session is None:
             return
 
+        if not all_slices:
+            self._preview_slice()
+            return
+
         if all_slices:
             if not session.imported:
                 self.status_message.emit("open and import the project before reconstructing")
                 return
-            path = self._ask_reconstruct_destination(session)
+            # Save settings' From/To slice range decides which slices "all
+            # slices" means; set before asking so the RAM estimate, the
+            # dialog and the (streamed or in-memory) run all agree on it.
+            n_rows_total = DataInterface(session.run.project).shape_of("projections")[1]
+            session.config.rows, n_selected = rows_for_export(session.export_rows, n_rows_total)
+            if n_selected <= 0:
+                self.status_message.emit("the From/To slice range in Save settings selects no slices")
+                return
+            path = self._ask_reconstruct_destination(session, n_rows_total, n_selected)
             if path == "":
                 return  # cancelled, or refused (nothing fits and streaming isn't possible)
             if path is not None:
                 self._reconstruct_streaming(session, path)
                 return
 
-        session.config.rows = None if all_slices else slice(session.preview_row, session.preview_row + 1)
-        label = "all slices" if all_slices else f"slice {session.preview_row}"
-        self.status_message.emit(f"reconstructing {label} for {session.project_id} ...")
+        self.status_message.emit(f"reconstructing the selected slices for {session.project_id} ...")
         self.reconstruct_slice_btn.setEnabled(False)
         self.reconstruct_all_btn.setEnabled(False)
         self.busy_changed.emit(True)
@@ -1163,13 +1353,8 @@ class AdjustmentPanel(QWidget):
             self.reconstruct_slice_btn.setEnabled(True)
             self.reconstruct_all_btn.setEnabled(True)
             session.error = None
-            if all_slices:
-                self.viewer.show_stack(volume)
-                session.ram_volume = volume
-                session.volume_path = None  # the in-memory volume is now the latest full reconstruction
-            else:
-                self.viewer.show_image(volume[0])
-                self._last_preview_volume = volume[0]  # see SaveSettingsTab's "Use preview slice's range"
+            session.ram_volume = volume  # shown through volume_written below, like a streamed volume
+            session.volume_path = None  # the in-memory volume is now the latest full reconstruction
             device_used = resolve_device(session.config.reconstruction_backend, session.config.device)
             message = f"reconstructed {session.project_id}: {volume.shape}, 1/cm ({device_used.upper()})"
             # The 1/cm unit is only physically meaningful if pixel size
@@ -1181,6 +1366,7 @@ class AdjustmentPanel(QWidget):
                 message += " -- pixel size not read from the file (see Basic settings); 1/cm scale may not be accurate"
             self.status_message.emit(message)
             self.session_changed.emit(session)  # picks up the new "reconstructed" status color
+            self.volume_written.emit(session)
 
         def failed(exc: Exception) -> None:
             self.busy_changed.emit(False)
@@ -1195,18 +1381,137 @@ class AdjustmentPanel(QWidget):
         def work() -> np.ndarray:
             if session.run is not None:
                 session.run.progress = self._relay
-            return _run_pipeline_to_reconstruction(session)
+            volume = _run_pipeline_to_reconstruction(session)
+            if session.config.dtype == "uint16":
+                # The full volume honours Save settings' output type too. With no
+                # Clip min/max set, the volume's own min/max is used (it is all here).
+                volume, _ = to_uint16(volume, session.config.dtype_clip_min, session.config.dtype_clip_max)
+            return volume
 
         self._workers.append(run_in_background(work, on_finished=done, on_failed=failed))
 
-    def _ask_reconstruct_destination(self, session: ProjectSession) -> Optional[str]:
+    # -- single-slice preview (with memory) ----------------------------------------
+
+    def _preview_slice(self) -> None:
+        """Reconstructs the preview slice at the current center. A result the
+        engine already has is shown at once; otherwise it is computed in the
+        background. A request that arrives meanwhile (mouse wheel) is
+        remembered and answered with the latest center when the current one
+        finishes, so the view never lags behind a burst of changes."""
+        session = self.session
+        if session is None:
+            return
+        if not session.imported:
+            self.status_message.emit("open and import the project before reconstructing")
+            return
+        self._auto_update_timer.stop()
+        self._prefetch_cancel.set()  # the foreground request has priority over background work
+
+        project = session.run.project
+        config = copy.deepcopy(session.config)
+        row = session.preview_row if session.preview_row is not None else 0
+        center = config.center if config.center is not None else DataInterface(project).shape_of("projections")[2] / 2.0
+
+        image = self.engine.cached(project, config, row, center)
+        if image is not None:
+            self._show_preview(session, image, center, cached=True)
+            self._schedule_prefetch_neighbours(center)
+            return
+        if self._preview_inflight:
+            self._preview_pending = True
+            return
+
+        self._preview_inflight = True
+        self.reconstruct_slice_btn.setEnabled(False)
+        self.busy_changed.emit(True)
+        self.progress_event.emit(ProgressEvent(
+            session.project_id, "Reconstructing", 0, 1, resolve_device(config.reconstruction_backend, config.device),
+        ))
+
+        def work() -> np.ndarray:
+            session.run.complete()
+            return self.engine.compute(project, config, row, center)
+
+        def done(image: np.ndarray) -> None:
+            self._preview_inflight = False
+            self.busy_changed.emit(False)
+            self.reconstruct_slice_btn.setEnabled(True)
+            if self._preview_pending and self.session is session:
+                self._preview_pending = False
+                self._preview_slice()  # the center moved on while this one was computing
+                return
+            self._show_preview(session, image, center, cached=False)
+            self._schedule_prefetch_neighbours(center)
+
+        def failed(exc: Exception) -> None:
+            self._preview_inflight = False
+            self._preview_pending = False
+            self.busy_changed.emit(False)
+            self.reconstruct_slice_btn.setEnabled(True)
+            session.error = str(exc)
+            self.status_message.emit(f"reconstruction failed: {describe_error(exc)}")
+            self.progress_event.emit(ProgressEvent(session.project_id, "Failed", message=describe_error(exc)))
+            if isinstance(exc, MemoryError):
+                QMessageBox.warning(self, "Out of memory", describe_error(exc))
+
+        self._workers.append(run_in_background(work, on_finished=done, on_failed=failed))
+
+    def _show_preview(self, session: ProjectSession, image: np.ndarray, center: float, cached: bool) -> None:
+        if session is not self.session:
+            return  # the user moved on to another project
+        self.viewer.show_image(image)
+        self._last_preview_volume = image  # see SaveSettingsTab's "Use preview slice's range"
+        session.error = None
+        device_used = resolve_device(session.config.reconstruction_backend, session.config.device)
+        self.progress_event.emit(ProgressEvent(session.project_id, "Done", 1, 1, device_used, "preview"))
+        message = (
+            f"preview of {session.project_id}, slice {session.preview_row}, center {center:.2f}: "
+            f"{image.shape}, 1/cm ({device_used.upper()})" + (" [remembered]" if cached else "")
+        )
+        # The 1/cm unit is only physically meaningful if pixel size
+        # is real, not the silent 1.0 um default -- see Basic
+        # settings' pixel size field and reconstruction/api.py's
+        # "Units" docstring.
+        if DataInterface(session.run.project).get_metadata_source("voxel_size") != "file":
+            message += " -- pixel size not read from the file (see Basic settings); 1/cm scale may not be accurate"
+        self.status_message.emit(message)
+        self.session_changed.emit(session)
+
+    PREFETCH_STEPS = 3  # neighbouring centers computed ahead, each side, in steps of the center box
+
+    def _schedule_prefetch_neighbours(self, center: float) -> None:
+        """With auto-update on, compute the centers a few mouse-wheel notches
+        either side of this one in the background, nearest first."""
+        if not self._auto_update:
+            return
+        step = self.basic_tab.center_spin.singleStep()
+        centers = []
+        for k in range(1, self.PREFETCH_STEPS + 1):
+            centers += [center + k * step, center - k * step]
+        self._schedule_prefetch(centers)
+
+    def _schedule_prefetch(self, centers: list) -> None:
+        session = self.session
+        if session is None or not session.imported or not centers:
+            return
+        self._prefetch_cancel.set()  # replace any earlier batch
+        cancel = threading.Event()
+        self._prefetch_cancel = cancel
+        project = session.run.project
+        row = session.preview_row if session.preview_row is not None else 0
+        run_in_background(
+            self.engine.prefetch, project, session.config, row, list(centers), cancelled=cancel.is_set,
+        )
+
+    def _ask_reconstruct_destination(self, session: ProjectSession, n_rows_total: int, n_selected: int) -> Optional[str]:
         """
         Asks where the whole volume should go. Returns the HDF5 path to
         stream into, None to reconstruct in memory, or "" if the user
         cancelled or nothing is possible (a message has been shown).
         """
         di = DataInterface(session.run.project)
-        n_angles, n_rows, width = di.shape_of("projections")
+        n_angles, _, width = di.shape_of("projections")
+        n_rows = n_selected
         plan = make_plan(n_angles, n_rows, width, di.get_metadata("geometry_type"))
         if not plan.can_stream and not plan.fits_in_ram:
             QMessageBox.warning(
@@ -1217,6 +1522,7 @@ class AdjustmentPanel(QWidget):
             return ""
         dialog = ReconstructDestinationDialog(
             session.project_id, plan, self.paths.default_volume_path(session.config), self,
+            details=describe_run(session.config, n_rows_total, n_selected),
         )
         if not dialog.exec():
             return ""
@@ -1242,7 +1548,8 @@ class AdjustmentPanel(QWidget):
 
         def done(written_path: str) -> None:
             self.busy_changed.emit(False)
-            total = DataInterface(session.run.project).shape_of("projections")[1]
+            n_rows_total = DataInterface(session.run.project).shape_of("projections")[1]
+            total = len(range(*config.rows.indices(n_rows_total))) if config.rows is not None else n_rows_total
             self.progress_event.emit(ProgressEvent(
                 session.project_id, "Done", total, total,
                 resolve_device(config.reconstruction_backend, config.device), f"written to {written_path}",

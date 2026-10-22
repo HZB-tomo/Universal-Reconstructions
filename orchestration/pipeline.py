@@ -206,7 +206,7 @@ class PipelineRun:
         # Rows are independent (parallel beam), so with a progress
         # callback the stack is reconstructed a chunk of rows at a time
         # -- same result, but the caller sees slices-done advance.
-        chunk_rows = ram_check.estimate_chunk_rows(self.normalized.shape[2], n_rows) if self.progress is not None else n_rows
+        chunk_rows = ram_check.estimate_chunk_rows(self.normalized.shape[2], n_rows, device, self.normalized.shape[0]) if self.progress is not None else n_rows
         if chunk_rows >= n_rows:
             self.volume = reconstruct_rows(self.normalized, self.centers)
         else:
@@ -421,7 +421,9 @@ class PipelineRun:
             method = "sinogram reorder" if supports_exact_rotation(angles, geometry.geometry_type) else "image-domain fallback"
             self._log(f"rotated {self.config.rotate_deg}deg via {method}")
 
-        chunk_rows = self.config.stream_chunk_rows or ram_check.estimate_chunk_rows(width, total_rows)
+        chunk_rows = self.config.stream_chunk_rows or ram_check.estimate_chunk_rows(
+            width, total_rows, self._device(), di.shape_of("projections")[0],
+        )
 
         template = self.config.export_path or self._default_export_path_template()
         path = self._resolve_export_path(template)

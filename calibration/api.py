@@ -54,6 +54,98 @@ def find_center(
     return backend_instance.find_center(sino_180, start=start, stop=stop, **options)
 
 
+@dataclass
+class CenterCandidate:
+    """One possible center of rotation from search_center().
+    score: best_metric / this candidate's metric, in (0, 1]; 1.0 is the
+    winner and a close second-best (e.g. 0.98) means the answer is
+    ambiguous. NaN when the backend cannot score candidates."""
+
+    center: float
+    metric: float
+    score: float
+
+
+@dataclass
+class CenterSearch:
+    """
+    Result of search_center().
+
+    best: the winning center (candidates[0].center).
+    candidates: best first; always at least one.
+    start, stop: the window that was searched.
+    at_edge: True if the winning minimum sat at the edge of the window,
+        i.e. the true center may lie outside it -- widen the tolerance
+        or change the guess.
+    """
+
+    best: float
+    candidates: list
+    start: float
+    stop: float
+    at_edge: bool
+
+
+def search_window(
+    width: int,
+    guess: Optional[float] = None,
+    tolerance: Optional[float] = None,
+    start: Optional[float] = None,
+    stop: Optional[float] = None,
+) -> tuple[float, float]:
+    """
+    The (start, stop) column window a search covers. Explicit `start`/
+    `stop` win. Otherwise: `guess` +/- `tolerance` (tolerance defaults
+    to a tenth of the width when only a guess is given), or, with
+    neither, the whole middle half of the detector (width/2 +/- width/4),
+    which is find_center()'s default.
+    """
+    if start is not None and stop is not None:
+        return float(start), float(stop)
+    if guess is not None:
+        tol = width / 10.0 if tolerance is None else float(tolerance)
+        return max(0.0, guess - tol), min(width - 1.0, guess + tol)
+    if tolerance is not None:
+        mid = width / 2.0
+        return max(0.0, mid - tolerance), min(width - 1.0, mid + tolerance)
+    return width / 2.0 - width / 4.0, width / 2.0 + width / 4.0
+
+
+def search_center(
+    sino_180: np.ndarray,
+    backend: Union[str, CalibrationBackend],
+    guess: Optional[float] = None,
+    tolerance: Optional[float] = None,
+    start: Optional[float] = None,
+    stop: Optional[float] = None,
+    n_candidates: int = 5,
+    **options,
+) -> CenterSearch:
+    """
+    Like find_center(), but searches a window you can steer with a
+    `guess` and a `tolerance` (+/- columns), and returns several scored
+    candidates instead of one number -- so when the automatic answer is
+    wrong, the other candidates are the next things to try.
+    See search_window() for how the window is chosen.
+    """
+    backend_instance = get_backend(backend) if isinstance(backend, str) else backend
+    sino_180 = np.asarray(sino_180)
+    width = sino_180.shape[-1]
+    lo, hi = search_window(width, guess, tolerance, start, stop)
+    found = backend_instance.search_centers(sino_180, start=lo, stop=hi, n_candidates=n_candidates, **options)
+    best_metric = found[0][1]
+    candidates = [
+        CenterCandidate(
+            center=float(c), metric=float(m),
+            score=float(best_metric / m) if np.isfinite(m) and m > 0 and np.isfinite(best_metric) else float("nan"),
+        )
+        for c, m in found
+    ]
+    best = candidates[0].center
+    at_edge = bool(getattr(backend_instance, "last_search_at_edge", False)) or abs(best - lo) < 1.0 or abs(best - hi) < 1.0
+    return CenterSearch(best=best, candidates=candidates, start=lo, stop=hi, at_edge=at_edge)
+
+
 def half_scan_slice(angles, tolerance: float = 1.0) -> slice:
     """
     Slice along the angle axis covering the first 180 degrees of a scan.

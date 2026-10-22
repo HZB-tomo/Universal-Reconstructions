@@ -112,6 +112,10 @@ data at all.
 
 ## Project panel
 
+Double-clicking the empty area below the project rows opens the import dialog
+(from disk); right-clicking it offers *Import project...* and *Import project
+to RAM...*.
+
 `ProjectPanel` is a `QTreeWidget`. One top-level item per session
 (`project_id`, checkable), with child rows underneath it for Status,
 Center of rotation, Tilt, Format, Storage (`INFO_FIELDS`).
@@ -278,22 +282,26 @@ image-domain-fallback split.
 
 ### Automatic adjustments
 
-**Find center of rotation**: `build_reference()` +
-`normalize_slice()` on the stack's middle row, then `find_center()` on
-the first 180 degrees of the scan.
-Writes the result into `session.config.center` and the Basic settings
-field.
+**Find center of rotation** searches the middle row. Fully automatic by
+default; type a **Guess** (or "Use current center") and a **Search +/-**
+tolerance to search only that window (a guess alone means +/- a tenth of the
+width). The best few candidates are listed ("match 1.00" is the winner; a
+second one near 1.0 means the answer is ambiguous): click one to use and
+preview it. If the best match sits at the edge of the window, the message and
+the note under the list say the true center may lie outside it. Guess,
+tolerance and candidates are kept per project.
+(`calibration.search_center()`, see CALIBRATION.md.)
 
-**Find tilt**: sets `session.config.rows = None`, runs
-`PipelineRun.preprocess()` on the full stack, then `find_tilt()` on
-`run.normalized` (first 180 degrees of the scan). Writes `tilt_deg` the
-same way.
+**Auto-update preview** (Basic settings, under Center of rotation): every
+change of the center (mouse wheel, typing, a candidate) re-previews the slice
+after a 120 ms pause. `PreviewEngine` (`gui/preview_engine.py`) remembers the
+normalized sinogram of the slice and every preview image (LRU, 512 MB), so a
+center already tried shows instantly, and with auto-update on the centers 3
+wheel-steps either side (and the other candidates after a search) are computed
+in the background. A change while a preview is computing is answered with the
+latest center when it finishes. One wheel notch is 0.5 px.
 
-Both flag the result in the status message (not block it) if it falls
-outside `MAX_PLAUSIBLE_COR_OFFSET_FRACTION` (2% of width from the
-image's midpoint) or `MAX_PLAUSIBLE_TILT_DEG` (1 degree). Both also
-trigger `self._reconstruct(all_slices=False)` once the new value is
-written, so the viewer's preview updates immediately.
+**Find tilt** is unchanged.
 
 ### Refinements
 
@@ -384,6 +392,13 @@ sinograms plus volume, with `SAFETY_FACTOR`), and offers
   as float32. The chosen folder is remembered (`RememberedPaths`, in
   memory only) as the default for later reconstructions.
 - *Keep in memory only*: the old path; disabled when it doesn't fit.
+
+Which slices, and in what type: **Reconstruct all slices** uses Save
+settings' From/To slice range (inclusive) and Output dtype, which default
+to every slice and float32. The dialog states both. The HDF5 file is
+written in that dtype; uint16 needs Clip min/max for streaming, and
+without them the file is written as float32 (the in-memory path scales to
+the volume's own range). The crop box is not applied here.
 
 If neither fits (e.g. cone-beam, low RAM) a message box says so. A
 `MemoryError` during a run is reported by name instead of an empty

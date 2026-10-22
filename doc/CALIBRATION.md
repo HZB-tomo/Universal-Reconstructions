@@ -57,6 +57,32 @@ offsets larger than a quarter of the width.
 `backend` is a registered backend name or a `CalibrationBackend`
 instance.
 
+## `search_center()`
+
+```python
+result = search_center(sino_180, backend="algotom", guess=147.0, tolerance=15, n_candidates=5)
+result.best          # the winning center
+result.candidates    # [CenterCandidate(center, metric, score), ...] best first; score 1.0 = winner
+result.start, result.stop, result.at_edge
+```
+
+`find_center()` returns one number. `search_center()` searches a window you
+can steer and returns several scored candidates, so when the automatic answer
+is wrong the alternatives are the next things to try.
+
+- Window (`search_window()`): explicit `start`/`stop` win; else `guess +/-
+  tolerance` (tolerance defaults to width/10); else `tolerance` around the
+  middle; else the middle half of the detector, `find_center()`'s default.
+- A backend that can score positions implements `search_centers()`; the
+  base-class default reports just its `find_center()` answer with a NaN
+  score. The `algotom` backend evaluates Vo's metric across the whole window,
+  takes every local minimum (at least 2% of the width apart), refines each to
+  0.25 px, and scores them all with the same metric.
+- `at_edge` is True when the winning match is at the window's edge: the true
+  center may be outside it, so widen the tolerance or move the guess. Very
+  small centers (a few columns from the detector edge) can produce spurious
+  minima; keep the window to where the axis plausibly is.
+
 ## `find_tilt()`
 
 ```python

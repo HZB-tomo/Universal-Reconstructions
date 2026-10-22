@@ -58,6 +58,8 @@ class ImageViewer(QWidget):
         self._shape: Optional[tuple] = None  # (n0, n1, n2) of a 3D source; None = not sliceable
         self._kind = "volume"  # or "projections"; only changes the buttons' tooltips
         self._axis = 0
+        self._single = False  # showing one preview image (show_image), not a browsable stack
+        self._aspect_locked = True
         self._n_frames = 0
         self._current_frame: Optional[np.ndarray] = None  # the displayed frame, cached for the hover readout
 
@@ -123,8 +125,14 @@ class ImageViewer(QWidget):
         self._set_source(frame_getter, n_frames, shape=shape, kind=kind)
 
     def show_image(self, array: np.ndarray) -> None:
-        """A single 2D image, no slider."""
-        self._set_source(array[np.newaxis], 1, shape=None, kind="volume")
+        """
+        A single 2D image, no slider -- a single-slice preview. If it has
+        the same shape as the image already showing, the zoom and pan are
+        kept, so repeated previews (e.g. while trying out centers of
+        rotation) don't jump back to the full view each time.
+        """
+        keep_zoom = self._current_frame is not None and tuple(self._current_frame.shape) == tuple(array.shape)
+        self._set_source(array[np.newaxis], 1, shape=None, kind="volume", keep_zoom=keep_zoom, single=True)
 
     def clear(self) -> None:
         self._source = None
@@ -140,15 +148,55 @@ class ImageViewer(QWidget):
         self._set_axis(0, show=False)
         self._update_axis_buttons()
 
-    def _set_source(self, source: FrameSource, n_frames: int, shape: Optional[tuple], kind: str) -> None:
+    def _set_source(
+        self, source: FrameSource, n_frames: int, shape: Optional[tuple], kind: str,
+        keep_zoom: bool = False, single: bool = False,
+    ) -> None:
         self._source = source
+        self._single = single
         self._shape = tuple(shape) if shape is not None and len(shape) == 3 else None
         self._kind = kind
         self._n_frames = n_frames
         self._set_axis(0, show=False)  # a new source always starts in the z view
         self._update_axis_buttons()
         self._configure_slider(n_frames, value=0)
-        self._show_frame(0, reset_view=True)
+        self._show_frame(0, reset_view=True, keep_zoom=keep_zoom)
+
+    # -- remembering where a project was left ----------------------------------
+
+    def view_state(self) -> Optional[dict]:
+        """
+        Slicing direction, slice number and zoom/pan of the stack on
+        screen, to hand back to restore_view() later. None when nothing
+        browsable is showing (empty, or a single preview image).
+        """
+        if self._source is None or self._single or self._current_frame is None:
+            return None
+        x_range, y_range = self._view.view.viewRange()
+        return {
+            "axis": self._axis,
+            "index": self._frame_slider.value(),
+            "frame_shape": tuple(self._current_frame.shape),
+            "x_range": tuple(x_range),
+            "y_range": tuple(y_range),
+        }
+
+    def restore_view(self, state: Optional[dict]) -> None:
+        """Go back to a state from view_state(), after the same project's
+        stack has been loaded again. The slice number is clamped to what
+        this stack has; the zoom is only restored if the frames still
+        have the same shape."""
+        if not state or self._source is None or self._single:
+            return
+        axis = state["axis"] if (self._shape is not None or state["axis"] == 0) else 0
+        n = self._shape[axis] if self._shape is not None else self._n_frames
+        index = min(max(int(state["index"]), 0), max(n - 1, 0))
+        if axis != self._axis or index != self._frame_slider.value():
+            self._set_axis(axis, show=True)
+            self._configure_slider(n, index)
+            self._show_frame(index, reset_view=True)
+        if tuple(self._current_frame.shape) == tuple(state["frame_shape"]):
+            self._view.view.setRange(xRange=state["x_range"], yRange=state["y_range"], padding=0)
 
     # -- slicing axis ----------------------------------------------------------
 
@@ -171,7 +219,10 @@ class ImageViewer(QWidget):
         # columns) -- locked 1:1 that is an unreadable thin strip.
         # Stretch it to fill the pane instead. Volume sections are
         # spatial on both axes, so they keep the true aspect ratio.
-        self._view.view.setAspectLocked(not (self._kind == "projections" and axis != 0))
+        locked = not (self._kind == "projections" and axis != 0)
+        if locked != self._aspect_locked:  # setAspectLocked re-fits the view, so don't call it needlessly
+            self._aspect_locked = locked
+            self._view.view.setAspectLocked(locked)
 
     def _update_axis_buttons(self) -> None:
         sliceable = self._shape is not None
@@ -204,7 +255,7 @@ class ImageViewer(QWidget):
             return self._source[key]
         return self._source(key)  # a frame_getter callable, one section's worth of I/O
 
-    def _show_frame(self, index: int, reset_view: bool) -> None:
+    def _show_frame(self, index: int, reset_view: bool, keep_zoom: bool = False) -> None:
         if self._source is None:
             return
         self._current_frame = self._frame_at(index)
@@ -217,7 +268,9 @@ class ImageViewer(QWidget):
         # reconstruction) or a new slicing direction, so scrubbing the
         # slider preserves the user's current zoom/pan/contrast
         # instead of resetting it every frame.
-        self._view.setImage(self._current_frame, axes={"y": 0, "x": 1}, autoLevels=reset_view, autoRange=reset_view)
+        self._view.setImage(
+            self._current_frame, axes={"y": 0, "x": 1}, autoLevels=reset_view, autoRange=reset_view and not keep_zoom,
+        )
 
     # -- crop rectangle -------------------------------------------------------
 

@@ -43,6 +43,25 @@ class CalibrationBackend(ABC):
         """
 
 
+    def search_centers(
+        self,
+        sino_180: np.ndarray,
+        start: float,
+        stop: float,
+        n_candidates: int = 5,
+        **options,
+    ) -> list[tuple[float, float]]:
+        """
+        Candidate centers of rotation within [start, stop], best first, as
+        (center, metric) pairs where a LOWER metric is a better fit.
+
+        The default implementation knows only its single best answer
+        (find_center()), reported with a NaN metric; a backend that can
+        score several positions should override this.
+        """
+        return [(self.find_center(sino_180, start=start, stop=stop, **options), float("nan"))]
+
+
 _REGISTRY: dict[str, CalibrationBackend] = {}
 
 

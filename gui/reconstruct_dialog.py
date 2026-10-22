@@ -25,13 +25,15 @@ from orchestration import ram_check
 
 
 class ReconstructDestinationDialog(QDialog):
-    def __init__(self, project_id: str, plan: ReconstructPlan, default_path: str, parent=None):
+    def __init__(self, project_id: str, plan: ReconstructPlan, default_path: str, parent=None, details: str = ""):
         super().__init__(parent)
         self.setWindowTitle("Reconstruct all slices")
         self._plan = plan
 
         message = (
-            f"You are about to reconstruct the whole volume of {project_id}.\n\n"
+            f"You are about to reconstruct the volume of {project_id}.\n"
+            + (f"{details}\n" if details else "")
+            + "\n"
             f"Available RAM: {ram_check.describe(plan.available_bytes)}\n"
             f"Needed to reconstruct in memory: about {ram_check.describe(plan.needed_bytes)}\n\n"
             "Do you want to write it as an HDF5 file? The slices are streamed to disk as they are "

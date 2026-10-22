@@ -34,6 +34,7 @@ class MainWindow(QMainWindow):
         self.resize(1400, 900)
         self._workers: list = []
         self._busy_count = 0
+        self._shown = None  # (ProjectSession, "projections" | "reconstruction") the viewer is showing, if any
 
         self.viewer = ImageViewer(self)
         self.setCentralWidget(self.viewer)
@@ -65,6 +66,7 @@ class MainWindow(QMainWindow):
         right_dock.setFeatures(_not_closable)
         self.addDockWidget(Qt.RightDockWidgetArea, right_dock)
 
+        self.project_panel.import_requested.connect(self._import)
         self.project_panel.project_opened.connect(self._open_project)
         self.project_panel.reconstruct_selected_requested.connect(self._reconstruct_selected)
         self.project_panel.save_requested.connect(self._save_sessions)
@@ -372,6 +374,16 @@ class MainWindow(QMainWindow):
 
     # -- opening a project ------------------------------------------------------
 
+    def _remember_view(self) -> None:
+        """Store the viewer's slicing direction / slice / zoom on the
+        project it is showing, before something else replaces it."""
+        if self._shown is None:
+            return
+        state = self.viewer.view_state()
+        if state is not None:
+            session, kind = self._shown
+            session.view_states[kind] = state
+
     def _open_project(self, session: ProjectSession) -> None:
         if not session.imported:
             if session.error is not None:
@@ -386,13 +398,17 @@ class MainWindow(QMainWindow):
         # get_projections() with no index would read the entire stack
         # just to open the project, defeating storage_mode="disk"
         # entirely.
+        self._remember_view()
         self.viewer.show_stack_lazy(di.get_projections, n_angles, shape=di.shape_of("projections"), kind="projections")
+        self.viewer.restore_view(session.view_states.get("projections"))
+        self._shown = (session, "projections")
         self.adjustment_panel.set_session(session)
         self._show_status(f"opened {session.project_id}")
 
     def _show_reconstruction(self, session: ProjectSession) -> None:
         """Shows the project's full reconstruction (in-memory or from its
         HDF5 file) in the viewer instead of its projections."""
+        self._remember_view()
         if session.ram_volume is not None:
             self.viewer.show_stack(session.ram_volume)
         elif session.volume_path is not None:
@@ -405,6 +421,8 @@ class MainWindow(QMainWindow):
         else:
             self._show_status(f"{session.project_id} has no full reconstruction yet -- use 'Reconstruct all slices'")
             return
+        self.viewer.restore_view(session.view_states.get("reconstruction"))
+        self._shown = (session, "reconstruction")
         self.adjustment_panel.set_session(session)
         self._show_status(f"showing reconstruction of {session.project_id}")
 
@@ -420,6 +438,8 @@ class MainWindow(QMainWindow):
         if self.adjustment_panel.session in sessions:
             self.adjustment_panel.set_session(None)
             self.viewer.clear()
+        if self._shown is not None and self._shown[0] in sessions:
+            self._shown = None
         self._show_status(f"deleted {len(sessions)} project(s)")
 
     def _on_settings_pasted(self, sessions: list) -> None:

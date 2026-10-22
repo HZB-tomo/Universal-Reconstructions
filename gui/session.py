@@ -5,7 +5,7 @@ GUI-only state that belongs in neither of those.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -47,6 +47,15 @@ class ProjectSession:
     volume_path: Optional[str] = None
     volume_dataset: str = "/volume"
     ram_volume: Optional[np.ndarray] = None
+    # Where the viewer was left for this project, per view ("projections" /
+    # "reconstruction"): slicing direction, slice number, zoom. See
+    # ImageViewer.view_state() and MainWindow._remember_view().
+    view_states: dict = field(default_factory=dict)
+    # Center-of-rotation search settings and its last result (Automatic
+    # adjustments tab): None means "auto"; candidates are (center, score).
+    cor_guess: Optional[float] = None
+    cor_tolerance: Optional[float] = None
+    cor_candidates: list = field(default_factory=list)
 
     @property
     def project_id(self) -> str:
