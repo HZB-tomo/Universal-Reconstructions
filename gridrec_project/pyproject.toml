@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "urct_gridrec"
+version = "0.1.0"
+description = "Gridrec (Fourier-gridding) tomographic reconstruction in NumPy/Numba, for CPU and GPU. A standalone prototype for URCT; no dependency on it."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = ["numpy", "scipy", "numba"]
+
+[project.optional-dependencies]
+# CuPy for the GPU path (needs an NVIDIA GPU + driver). Use the cupy-cuda11x wheel for CUDA 11.
+gpu = ["cupy-cuda12x"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

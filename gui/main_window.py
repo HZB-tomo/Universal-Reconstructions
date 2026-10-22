@@ -118,6 +118,14 @@ class MainWindow(QMainWindow):
         tools_menu = self.menuBar().addMenu("Tools")
         tools_menu.addAction("Convert TIFF project to HDF5...", self._open_convert_dialog)
 
+    def warm_up_backends(self) -> None:
+        """Compile the gridrec kernels in the background right after start-up (Numba's cache
+        makes later starts quick), so the first preview does not wait for the compiler.
+        Called by gui.main; failures are ignored -- the backend just compiles on first use."""
+        from reconstruction.backends.gridrec import warm_up
+
+        self._workers.append(run_in_background(warm_up, on_finished=lambda _r: None, on_failed=lambda _e: None))
+
     def _open_convert_dialog(self) -> None:
         if self._convert_dialog is None:
             self._convert_dialog = ConvertDialog(self)

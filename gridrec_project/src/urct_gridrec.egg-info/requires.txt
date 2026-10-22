@@ -1,0 +1,9 @@
+numpy
+scipy
+numba
+
+[dev]
+pytest
+
+[gpu]
+cupy-cuda12x

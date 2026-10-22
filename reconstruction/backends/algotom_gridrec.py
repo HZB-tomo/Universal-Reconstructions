@@ -35,6 +35,7 @@ from reconstruction.backends._algotom_common import algotom_reconstruction
 class AlgotomGridrecBackend(ReconstructionBackend):
     name = "algotom_gridrec"
     supported_geometries = {"parallel"}
+    requires = ("algotom", "tomopy")   # tomopy has no pip wheel (conda only); see the module docstring
 
     def reconstruct(
         self,

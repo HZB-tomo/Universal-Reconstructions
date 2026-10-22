@@ -61,6 +61,7 @@ from reconstruction.backends._algotom_common import algotom_reconstruction
 class AlgotomBpBackend(ReconstructionBackend):
     name = "algotom_bp"
     supported_geometries = {"parallel"}
+    requires = ("algotom", "astra")   # astra: the astra-toolbox package
     _method_base = "BP"
 
     def reconstruct(

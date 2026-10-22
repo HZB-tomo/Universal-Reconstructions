@@ -9,7 +9,6 @@ import pytest
 
 from orchestration import ram_check
 from reconstruction.backend import Geometry, get_backend
-from reconstruction.backends.algotom_fbp import gpu_batch_size, plan_batches
 
 algotom = pytest.importorskip("algotom")
 from algotom.rec import reconstruction as rec  # noqa: E402
@@ -75,39 +74,78 @@ def test_single_slice_keeps_the_stack_shape(stack):
     assert out.shape == (1, 64, 64)
 
 
-def test_plan_batches_covers_every_slice_once():
-    assert plan_batches(10, 4) == [slice(0, 4), slice(4, 8), slice(8, 10)]
-    assert plan_batches(3, 100) == [slice(0, 3)]
-    assert plan_batches(3, 0) == [slice(0, 1), slice(1, 2), slice(2, 3)]  # never a zero-size batch
-
-
-def test_gpu_batch_size_scales_with_free_memory():
-    assert gpu_batch_size(1000, 1024, None) == 16
-    small = gpu_batch_size(1000, 1024, 1 * 1024**3)
-    large = gpu_batch_size(1000, 1024, 16 * 1024**3)
-    assert 1 <= small < large
-    assert gpu_batch_size(100000, 100000, 1) == 1  # never below one slice
-
-
 class _Mem:
     available = 64 * 1024**3
 
 
-def test_gpu_chunks_are_bigger_than_cpu_chunks_when_gpu_memory_allows(monkeypatch):
+def test_gpu_chunks_hold_enough_rows_to_keep_the_filter_pipeline_full(monkeypatch):
     monkeypatch.setattr(ram_check.psutil, "virtual_memory", lambda: _Mem())
     monkeypatch.setattr(ram_check.os, "cpu_count", lambda: 8)
-    monkeypatch.setattr(ram_check, "gpu_free_bytes", lambda: 24 * 1024**3)
-    cpu = ram_check.estimate_chunk_rows(1024, 5000, "cpu", 1000)
-    gpu = ram_check.estimate_chunk_rows(1024, 5000, "gpu", 1000)
-    assert cpu == 8 and 8 < gpu <= ram_check.MAX_GPU_CHUNK_ROWS
+    assert ram_check.estimate_chunk_rows(1024, 5000, "cpu", 1000) == 8
+    assert ram_check.estimate_chunk_rows(1024, 5000, "gpu", 1000) == ram_check.GPU_CHUNK_ROWS
+    assert ram_check.estimate_chunk_rows(1024, 5, "gpu", 1000) == 5  # never more rows than exist
 
 
-def test_gpu_chunks_fall_back_to_cpu_sizing_without_gpu_info(monkeypatch):
-    monkeypatch.setattr(ram_check.psutil, "virtual_memory", lambda: _Mem())
+def test_gpu_chunks_still_respect_free_ram(monkeypatch):
+    class Tight:
+        available = int(ram_check.estimate_volume_bytes(1, 1024) * ram_check.SAFETY_FACTOR * 3.5)
+
+    monkeypatch.setattr(ram_check.psutil, "virtual_memory", lambda: Tight())
     monkeypatch.setattr(ram_check.os, "cpu_count", lambda: 8)
-    monkeypatch.setattr(ram_check, "gpu_free_bytes", lambda: None)
-    assert ram_check.estimate_chunk_rows(1024, 5000, "gpu", 1000) == 8
-    assert ram_check.estimate_chunk_rows(1024, 3, "gpu", 1000) == 3
+    assert ram_check.estimate_chunk_rows(1024, 5000, "gpu", 1000) == 3
+
+
+# -- the GPU path, run on numba's CUDA simulator ---------------------------------------
+# No GPU is needed: NUMBA_ENABLE_CUDASIM=1 executes the real kernels in Python. It must be
+# set before numba is imported, hence the subprocess. This checks the GPU code's results
+# and that the many-slices-per-launch kernel is never used; it says nothing about speed.
+
+_SIM_SCRIPT = r"""
+import os, sys, warnings
+os.environ["NUMBA_ENABLE_CUDASIM"] = "1"
+warnings.filterwarnings("ignore")
+sys.path.insert(0, sys.argv[1])
+import numpy as np
+from algotom.rec import reconstruction as rec
+assert rec.cuda.is_available()
+
+def forbidden(*a, **k):
+    raise AssertionError("the many-slices-per-launch GPU kernel must not be used")
+rec.back_projection_gpu_chunk = forbidden
+rec.__dict__["__back_projection_gpu_chunk_kernel"] = forbidden
+
+from reconstruction import Geometry, get_backend
+from reconstruction.backends._fbp_cpu import bpf_stack, fbp_stack
+
+rng = np.random.default_rng(0)
+stack = rng.uniform(0.2, 1.0, (24, 4, 32)).astype(np.float32)
+stack[3, 1, 5] = 0.0                      # a non-positive value algotom would overwrite in place
+angles = np.linspace(0, 180, 24, endpoint=False)
+before = stack.copy()
+geo = Geometry(geometry_type="parallel")
+inner = (slice(None), slice(1, -1), slice(1, -1))
+for name, cpu_fn in (("algotom_fbp", fbp_stack), ("algotom_bpf", bpf_stack)):
+    backend = get_backend(name)
+    assert backend.actual_device("gpu") == "gpu"
+    for centers in (15.5, np.array([15.0, 15.5, 16.0, 16.5])):       # shared center, then tilt-like
+        gpu = backend.reconstruct(stack, angles, centers, geo, device="gpu")
+        cpu = cpu_fn(rec, stack, np.broadcast_to(np.asarray(centers, float), (4,)), np.radians(angles))
+        err = np.linalg.norm(gpu[inner] - cpu[inner]) / np.linalg.norm(cpu[inner])
+        assert gpu.shape == (4, 32, 32) and gpu.dtype == np.float32, (name, gpu.shape, gpu.dtype)
+        assert err < 1e-4, (name, err)
+assert np.array_equal(stack, before), "input was modified"
+print("OK")
+"""
+
+
+def test_gpu_fbp_and_bpf_match_the_cpu_results_on_the_cuda_simulator():
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = str(Path(__file__).resolve().parents[1])
+    result = subprocess.run([sys.executable, "-c", _SIM_SCRIPT, root], capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
 
 
 # -- BPF and DFI ---------------------------------------------------------------

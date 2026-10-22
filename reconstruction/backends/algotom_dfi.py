@@ -21,6 +21,7 @@ from reconstruction.backends.algotom_fbp import protect_input
 class AlgotomDfiBackend(ReconstructionBackend):
     name = "algotom_dfi"
     supported_geometries = {"parallel"}
+    requires = ("algotom",)
 
     def reconstruct(
         self,

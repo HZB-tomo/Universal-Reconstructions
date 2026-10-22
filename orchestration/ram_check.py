@@ -7,8 +7,6 @@ need it -- see PipelineRun._run_streaming() in pipeline.py.
 from __future__ import annotations
 
 import os
-from typing import Optional
-
 import psutil
 
 # The float32 output array is not the only thing in memory during a
@@ -63,22 +61,11 @@ def describe(num_bytes: int) -> str:
     return f"{size:.1f} GB"
 
 
-def gpu_free_bytes() -> Optional[int]:
-    """Free GPU memory in bytes, or None if there is no usable CUDA GPU
-    (or numba is not installed)."""
-    try:
-        from numba import cuda
-
-        if not cuda.is_available():
-            return None
-        return int(cuda.current_context().get_memory_info()[0])
-    except Exception:  # noqa: BLE001 -- any CUDA/numba problem just means "no GPU info"
-        return None
-
-
-# Rows per chunk are capped on a GPU so one chunk stays a reasonable
-# unit of progress reporting and of host memory.
-MAX_GPU_CHUNK_ROWS = 256
+# A GPU run reconstructs slice by slice, but the CPU filters the next
+# slices on worker threads while it works (see reconstruction/backends/
+# _fbp_gpu.py), so a chunk should hold enough rows to keep that pipeline
+# full. More than this buys nothing and only holds more data in RAM.
+GPU_CHUNK_ROWS = 32
 
 
 def estimate_chunk_rows(width: int, max_rows: int, device: str = "cpu", n_angles: int = 0) -> int:
@@ -102,11 +89,5 @@ def estimate_chunk_rows(width: int, max_rows: int, device: str = "cpu", n_angles
     ram_limited_rows = max(1, int(psutil.virtual_memory().available // per_row_bytes))
     cpu_friendly_rows = max(1, os.cpu_count() or 1)
     if device == "gpu":
-        # A GPU is fed best with big batches (one kernel launch covers
-        # every slice in the chunk), not one slice per CPU core: use as
-        # many rows as free GPU memory and RAM allow, up to a cap.
-        free = gpu_free_bytes()
-        per_row_gpu = (n_angles * (width + 300) + width * width) * BYTES_PER_FLOAT32 * 2
-        gpu_limited_rows = max(1, int(free * 0.5 // per_row_gpu)) if free is not None else cpu_friendly_rows
-        return max(1, min(max(cpu_friendly_rows, gpu_limited_rows), ram_limited_rows, MAX_GPU_CHUNK_ROWS, max_rows))
+        return max(1, min(max(cpu_friendly_rows, GPU_CHUNK_ROWS), ram_limited_rows, max_rows))
     return max(1, min(cpu_friendly_rows, ram_limited_rows, max_rows))

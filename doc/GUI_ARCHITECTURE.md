@@ -255,9 +255,13 @@ the user.
 otherwise it's editable, writing into
 `completion_answers["voxel_size"]`.
 
-The reconstruction-algorithm combo lists every registered backend
-except `algotom_gridrec` (needs `tomopy`, conda-only, no pip wheel --
-usable via the CLI/scripting API instead). An "Iterations" spin box
+The reconstruction-algorithm combo is built from the backend registry
+(`reconstruction.list_backends()`): every registered backend whose
+required packages are installed, in a fixed order (`algotom_fbp`,
+`gridrec`, `algotom_bpf`, ...) with any others alphabetically after.
+`algotom_gridrec` (needs conda-only tomopy) and the ASTRA backends
+(need `astra-toolbox`) therefore only appear when those are installed,
+and a backend someone adds shows up with no change here. An "Iterations" spin box
 (`num_iter_spin`, writing into
 `session.config.reconstruction_options["num_iter"]`) is shown only for
 the four iterative backends (SIRT/SART/ART/CGLS --

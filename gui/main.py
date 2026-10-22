@@ -15,6 +15,7 @@ def main() -> None:
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
+    window.warm_up_backends()
     sys.exit(app.exec())
 
 

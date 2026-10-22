@@ -19,8 +19,13 @@ source .venv/bin/activate                # macOS/Linux
 ## 2. Install the project
 
 ```bash
-pip install -e .[dev]
+pip install -e ./gridrec_project     # the fast gridrec backend; a package in this repository
+pip install -e ".[all,dev]"          # GUI, algotom, gridrec, pytest
 ```
+
+(The first line goes away once `urct_gridrec` is published to PyPI.) For a
+smaller install use only the extras you need, e.g. `pip install -e ".[dev]"`;
+the README's "What the extras add" table lists them all.
 
 The `-e` (editable) install means `import core` and `import data_import`
 work from any notebook or script running in this virtual environment.
@@ -38,9 +43,12 @@ python -m ipykernel install --user --name=tomo_project --display-name="Python (t
 ### Desktop GUI
 
 ```bash
-pip install -e .[gui]
+pip install -e ".[gui]"              # already included in ".[all]"
 tomo-gui
 ```
+
+The first start compiles the gridrec kernels in the background (a few
+seconds, then cached), so the first gridrec preview is not delayed.
 
 On Linux, PySide6/Qt6 needs a few system libraries not always present
 on a minimal install (Ubuntu/Debian):

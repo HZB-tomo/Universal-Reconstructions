@@ -7,6 +7,7 @@ Geometry describes the acquisition geometry a sinogram was taken with.
 """
 from __future__ import annotations
 
+import importlib.util
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Literal, Optional
@@ -46,11 +47,25 @@ class ReconstructionBackend(ABC):
                                BPF, DFI, plain BP) ignore it, and the GUI
                                only shows an iteration-count control when
                                this is True.
+        requires:             names of the Python modules this backend
+                               needs at run time, e.g. ("algotom",). The
+                               backend stays registered without them, but
+                               is_available() is False, so the GUI leaves
+                               it out of the algorithm list instead of
+                               offering a choice that can only fail.
     """
 
     name: str
     supported_geometries: set
     is_iterative: bool = False
+    requires: tuple = ()
+
+    def missing_requirements(self) -> list:
+        """The modules from `requires` that cannot be imported right now."""
+        return [m for m in self.requires if importlib.util.find_spec(m) is None]
+
+    def is_available(self) -> bool:
+        return not self.missing_requirements()
 
     @abstractmethod
     def reconstruct(
@@ -121,6 +136,22 @@ def get_backend(name: str) -> ReconstructionBackend:
     if name not in _REGISTRY:
         raise KeyError(f"Unknown reconstruction backend '{name}'. Registered: {sorted(_REGISTRY)}")
     return _REGISTRY[name]
+
+
+# Order of the algorithm list in the GUI: the general-purpose analytic methods first,
+# then the rest of the built-ins; backends not named here (yours) follow alphabetically.
+_DISPLAY_ORDER = (
+    "algotom_fbp", "gridrec", "algotom_bpf", "algotom_dfi", "algotom_bp",
+    "algotom_sirt", "algotom_sart", "algotom_art", "algotom_cgls", "algotom_gridrec",
+)
+
+
+def list_backends(available_only: bool = True) -> list:
+    """Registered backend names, in display order. With available_only (the
+    default), backends whose required packages are not installed are left out."""
+    names = [n for n, b in _REGISTRY.items() if not available_only or b.is_available()]
+    known = [n for n in _DISPLAY_ORDER if n in names]
+    return known + sorted(n for n in names if n not in _DISPLAY_ORDER)
 
 
 def clear_registry():

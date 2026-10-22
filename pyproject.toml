@@ -43,6 +43,16 @@ preprocessing = ["algotom"]
 # be installed separately via conda (`conda install -c conda-forge
 # tomopy`); not listed here for that reason.
 reconstruction_extra = ["astra-toolbox"]
+# The `gridrec` reconstruction backend: Fourier-gridding FBP, several times
+# to tens of times faster than FBP, pure Python (Numba), plain pip install.
+# It lives in this repository as its own package, gridrec_project/. Until it
+# is published to PyPI, install it from the checkout BEFORE installing this
+# extra:    pip install -e ./gridrec_project     (see the README)
+gridrec = ["urct_gridrec"]
+# ... and its GPU path (NVIDIA GPU + driver; experimental, CUDA 12 wheels).
+gridrec_gpu = ["urct_gridrec[gpu]"]
+# Everything that installs with pip alone (no ASTRA, no TomoPy, no GPU extras).
+all = ["tomo_project[gui,preprocessing,gridrec]"]
 # Only needed to run the desktop GUI (`tomo-gui` / `python -m gui`).
 # See doc/GUI_ARCHITECTURE.md.
 gui = ["PySide6", "pyqtgraph", "psutil"]

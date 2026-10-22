@@ -39,7 +39,7 @@ from calibration import find_tilt, half_scan_slice, search_center
 from core.data_interface import DataInterface
 from orchestration import PipelineRun, ProgressEvent, load_config, save_config
 from preprocessing import build_reference, normalize_slice
-from reconstruction import get_backend, resolve_device, to_uint16
+from reconstruction import get_backend, list_backends, resolve_device, to_uint16
 
 from orchestration import ram_check
 from gui.preview_engine import PreviewEngine
@@ -126,16 +126,11 @@ class BasicSettingsTab(QWidget):
         self.slice_spin.valueChanged.connect(self.slice_changed)
 
         self.backend_combo = QComboBox(self)
-        # algotom_gridrec omitted from this list even though it's a
-        # registered backend: it needs tomopy, which has no pip wheel
-        # at all (conda-only) -- offering it here would just be a
-        # button that always fails for anyone using this project's
-        # normal pip install. Use it via the CLI/scripting API directly
-        # if you've set up tomopy yourself.
-        self.backend_combo.addItems([
-            "algotom_fbp", "algotom_bpf", "algotom_dfi", "algotom_bp",
-            "algotom_sirt", "algotom_sart", "algotom_art", "algotom_cgls",
-        ])
+        # Whatever is registered AND usable right now: a backend whose packages are not
+        # installed (algotom_gridrec needs conda-only tomopy, the ASTRA ones need astra,
+        # gridrec needs urct_gridrec) is simply not offered, and one a user adds
+        # shows up here without touching this file. See reconstruction.list_backends().
+        self.backend_combo.addItems(list_backends())
         self.backend_combo.currentTextChanged.connect(self.backend_changed)
 
         # Only meaningful for the iterative backends (SIRT/SART/ART/CGLS

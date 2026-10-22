@@ -3,3 +3,5 @@ scipy
 h5py
 tifffile
 pytest
+# the gridrec reconstruction backend (a package in this repository)
+-e ./gridrec_project

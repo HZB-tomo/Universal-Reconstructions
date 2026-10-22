@@ -62,13 +62,16 @@ phantom).
 
 ## Built-in backends
 
-All nine wrap `algotom`, and all are parallel-beam only. Every one
-past `algotom_fbp` was added by wrapping a function algotom already
-exposes -- none of this is a new reconstruction implementation.
+Ten backends, all parallel-beam only. Nine wrap `algotom`; `gridrec` is
+this project's own implementation (see below). Each backend declares the
+packages it needs (`ReconstructionBackend.requires`); one whose packages are
+missing stays registered but is left out of the GUI's algorithm list, and
+`reconstruction.list_backends()` returns only the usable ones.
 
 | Backend | Wraps | Device | Extra dependency |
 |---|---|---|---|
 | `algotom_fbp` | `fbp_reconstruction` | CPU/GPU | `algotom` (via the `preprocessing` extra) |
+| `gridrec` | `urct_gridrec` (own implementation) | CPU; GPU on request (experimental) | `urct_gridrec` (the `gridrec` extra) |
 | `algotom_gridrec` | `gridrec_reconstruction` | CPU only | `algotom` **and** `tomopy` (conda-only, no pip wheel -- see below) |
 | `algotom_bpf` | `bpf_reconstruction` | CPU/GPU | `algotom` |
 | `algotom_dfi` | `dfi_reconstruction` | CPU only | `algotom` |
@@ -98,9 +101,38 @@ instead. ASTRA gives no warning when this is too low.
 `algotom_gridrec` needs `tomopy` -- `gridrec_reconstruction()` is a
 thin wrapper around it, not an algotom-native implementation -- and
 TomoPy has no pip wheel, conda-only (`conda install -c conda-forge
-tomopy`). It's left out of the GUI's reconstruction-algorithm list for
-that reason (see `gui/adjustment_panel.py`); it's still a registered
-backend, usable via the CLI/scripting API once tomopy is installed.
+tomopy`). It only appears in the GUI's algorithm list when tomopy is
+importable; the `gridrec` backend below does the same job without conda.
+
+### `gridrec`
+
+Fourier-gridding filtered backprojection (Dowd et al., J. Synchrotron
+Rad. 6, 255, 1999), implemented in the separate `urct_gridrec` package
+(`gridrec_project/`; how it works, tests and benchmarks are in its README).
+Per slice it costs about width^2 log(width) instead of backprojection's
+width^2 x angles, so it is faster the larger the scan:
+
+| Phantom width | 256 | 512 | 1024 | 2048 |
+|---|---|---|---|---|
+| speedup over `algotom_fbp` (CPU) | 14x | 17x | 32x | 56x |
+
+Real project files in `gui_samples/` ran 5-16x faster. Accuracy against the
+true image is the same or slightly better than FBP's; output has the same
+scale (1/cm after unit conversion). It is reproducible: the same input gives
+the same bits, because the gridding is split between threads without any
+shared writes.
+
+Options (`reconstruction_options`): `filter_name` (`ramp`, `hann` default,
+`hamming`, `cosine`, `shepp-logan`), `oversampling` (default 1.25: padded
+length / width), `kernel_width` (default 6), `ratio` (circular field of view,
+1.0 default, `None` to keep the corners), `apply_log` (default True: input is
+transmission).
+
+Device: `Auto`/`CPU` use the CPU, which is the tested path. `GPU` runs the
+FFTs on CuPy (`pip install -e ".[gridrec_gpu]"`) and the gridding as a
+`numba.cuda` kernel; that path is checked against the CPU on numba's CUDA
+simulator but has not been timed on a real GPU, so it is never chosen
+automatically.
 
 `resolve_device(backend, device)` reports which device a call will
 actually use (or did use), accounting for real hardware, not just the
@@ -108,6 +140,7 @@ actually use (or did use), accounting for real hardware, not just the
 backend but `algotom_gridrec`/`algotom_dfi` (no GPU path in algotom)
 checks the same `numba.cuda.is_available()` that
 `fbp_reconstruction()`/`astra_reconstruction()` use internally.
+`gridrec` is CPU unless asked for the GPU explicitly.
 
 ## Units
 
@@ -324,6 +357,7 @@ from reconstruction.backend import ReconstructionBackend, register_backend
 class MyBackend(ReconstructionBackend):
     name = "my_backend"
     supported_geometries = {"parallel"}  # or {"parallel", "cone"}
+    requires = ("my_library",)           # modules it imports; missing -> not offered in the GUI
 
     def reconstruct(self, sinograms, angles, center, geometry, device=None, **options):
         ...  # sinograms: (n_angles, n_slices, width)
@@ -335,7 +369,14 @@ the batch (looping per slice, a library's native batch API, CPU or
 GPU) is internal to the backend.
 
 Add an import line to `reconstruction/backends/__init__.py` to
-register a new module.
+register a new module. The GUI's algorithm list is built from the
+registry (`reconstruction.list_backends()`), so a registered backend
+whose `requires` are installed shows up there without editing the GUI.
+
+Inputs are normalized transmission values (what `preprocessing`
+returns), not attenuation: take the -log inside the backend (the
+algotom and gridrec backends do). `center` is a scalar or one value per
+slice; `device` is a hint -- report the truth in `actual_device()`.
 
 ## `algotom_fbp` backend
 

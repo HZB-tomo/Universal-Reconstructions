@@ -277,6 +277,9 @@ Turns normalized sinograms into reconstructed images. Does not take a
   `preprocessing.normalize_rows()`'s output; output is
   `(n_slices, height, width)`, matching this codebase's volume
   convention.
+- `backends/gridrec.py`: a thin wrapper over the separate `urct_gridrec`
+  package (`gridrec_project/`), the project's own fast gridrec; optional,
+  installed with the `gridrec` extra.
 - `backends/algotom_fbp.py`: the built-in backend, parallel-beam only,
   wrapping `algotom.rec.reconstruction.fbp_reconstruction` (one
   sinogram at a time; this backend loops over the stack).

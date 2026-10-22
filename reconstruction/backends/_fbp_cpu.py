@@ -16,6 +16,9 @@ numba is imported here, so import this module lazily (the backend does).
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Optional
+
 import numpy as np
 from numba import njit, prange
 
@@ -62,6 +65,52 @@ def back_projection(sinogram: np.ndarray, angles: np.ndarray, center: float, edg
     return recon
 
 
+@dataclass
+class Settings:
+    """The reconstruction options shared by every FBP/BPF implementation
+    (CPU and GPU), resolved once per call the way algotom does."""
+
+    filter_name: str
+    pad: int
+    pad_mode: str
+    apply_log: bool
+    ramp_win: np.ndarray
+    mask: Optional[np.ndarray]
+
+
+def settings(rec, n_angles: int, ncol: int, centers: np.ndarray, options: dict, circular: bool) -> Settings:
+    """`circular` selects BPF's image-domain ramp window instead of FBP's sinogram one."""
+    from algotom.util import utility as util
+
+    filter_name = options.get("filter_name", "hann")
+    pad = options.get("pad")
+    pad = min(int(0.15 * ncol), 150) if pad is None else pad
+    ramp_win = options.get("ramp_win")
+    if ramp_win is None:
+        ramp_win = (
+            rec.make_circular_ramp_window(ncol + 2 * pad, filter_name) if circular
+            else rec.make_2d_ramp_window(n_angles, ncol + 2 * pad, filter_name)
+        )
+    ratio = options.get("ratio", 1.0)
+    mask = None
+    if ratio is not None:
+        mask = util.make_circle_mask(ncol, min(centers[0], ncol - centers[0]) / (0.5 * ncol) if ratio == 0.0 else ratio)
+    return Settings(
+        filter_name=filter_name, pad=pad, pad_mode=options.get("pad_mode", "edge"),
+        apply_log=options.get("apply_log", True), ramp_win=ramp_win, mask=mask,
+    )
+
+
+def attenuation(sino_column: np.ndarray, apply_log: bool) -> np.ndarray:
+    """One slice's sinogram as a float32 copy (the caller's array is never touched),
+    with -log applied the way algotom does: values <= 0 become 1 first."""
+    sino = np.array(sino_column, dtype=np.float32)
+    if apply_log:
+        sino[sino <= 0.0] = np.float32(1.0)
+        sino = -np.log(sino)
+    return sino
+
+
 def fbp_stack(rec, sinograms: np.ndarray, centers: np.ndarray, angles_rad: np.ndarray, **options) -> np.ndarray:
     """
     FBP of a (n_angles, n_slices, width) stack on the CPU, one center per
@@ -70,36 +119,18 @@ def fbp_stack(rec, sinograms: np.ndarray, centers: np.ndarray, angles_rad: np.nd
     race-free back_projection() above. Does not modify `sinograms`.
     Returns (n_slices, width, width) float32.
     """
-    from algotom.util import utility as util
-
     n_angles, n_slices, ncol = sinograms.shape
-    filter_name = options.get("filter_name", "hann")
-    pad = options.get("pad")
-    pad = min(int(0.15 * ncol), 150) if pad is None else pad
-    pad_mode = options.get("pad_mode", "edge")
-    apply_log = options.get("apply_log", True)
-    ratio = options.get("ratio", 1.0)
-    ramp_win = options.get("ramp_win")
-    if ramp_win is None:
-        ramp_win = rec.make_2d_ramp_window(n_angles, ncol + 2 * pad, filter_name)
-
-    mask = None
-    if ratio is not None:
-        mask = util.make_circle_mask(ncol, min(centers[0], ncol - centers[0]) / (0.5 * ncol) if ratio == 0.0 else ratio)
-
+    s = settings(rec, n_angles, ncol, centers, options, circular=False)
     angles32 = np.float32(angles_rad)
     out = np.empty((n_slices, ncol, ncol), dtype=np.float32)
     for i in range(n_slices):
-        sino = np.array(sinograms[:, i, :], dtype=np.float32)  # a copy: never touch the caller's array
-        if apply_log:
-            sino[sino <= 0.0] = np.float32(1.0)
-            sino = -np.log(sino)
+        sino = attenuation(sinograms[:, i, :], s.apply_log)
         filtered = np.ascontiguousarray(
-            rec.apply_ramp_filter(sino, ramp_win, filter_name, pad, pad_mode), dtype=np.float32,
+            rec.apply_ramp_filter(sino, s.ramp_win, s.filter_name, s.pad, s.pad_mode), dtype=np.float32,
         )
         image = back_projection(filtered, angles32, np.float32(centers[i]))
-        if mask is not None:
-            image = image * mask
+        if s.mask is not None:
+            image = image * s.mask
         out[i] = image * np.float32(np.pi / (n_angles - 1))
     return out
 
@@ -113,33 +144,15 @@ def bpf_stack(rec, sinograms: np.ndarray, centers: np.ndarray, angles_rad: np.nd
     back_projection(). Does not modify `sinograms`.
     Returns (n_slices, width, width) float32.
     """
-    from algotom.util import utility as util
-
     n_angles, n_slices, ncol = sinograms.shape
-    filter_name = options.get("filter_name", "hann")
-    pad = options.get("pad")
-    pad = min(int(0.15 * ncol), 150) if pad is None else pad
-    pad_mode = options.get("pad_mode", "edge")
-    apply_log = options.get("apply_log", True)
-    ratio = options.get("ratio", 1.0)
-    ramp_win = options.get("ramp_win")
-    if ramp_win is None:
-        ramp_win = rec.make_circular_ramp_window(ncol + 2 * pad, filter_name)
-
-    mask = None
-    if ratio is not None:
-        mask = util.make_circle_mask(ncol, min(centers[0], ncol - centers[0]) / (0.5 * ncol) if ratio == 0.0 else ratio)
-
+    s = settings(rec, n_angles, ncol, centers, options, circular=True)
     angles32 = np.float32(angles_rad)
     out = np.empty((n_slices, ncol, ncol), dtype=np.float32)
     for i in range(n_slices):
-        sino = np.array(sinograms[:, i, :], dtype=np.float32)  # a copy: never touch the caller's array
-        if apply_log:
-            sino[sino <= 0.0] = np.float32(1.0)
-            sino = -np.log(sino)
+        sino = attenuation(sinograms[:, i, :], s.apply_log)
         image = back_projection(np.ascontiguousarray(sino), angles32, np.float32(centers[i]), True)
-        image = rec.apply_circular_ramp_filter(image, ramp_win, pad=pad, pad_mode=pad_mode)
-        if mask is not None:
-            image = image * mask
+        image = rec.apply_circular_ramp_filter(image, s.ramp_win, pad=s.pad, pad_mode=s.pad_mode)
+        if s.mask is not None:
+            image = image * s.mask
         out[i] = image * np.float32(np.pi / (n_angles - 1))
     return out
