@@ -43,3 +43,16 @@ def run_in_background(fn, *args, on_finished=None, on_failed=None, **kwargs) -> 
         worker.signals.failed.connect(on_failed)
     QThreadPool.globalInstance().start(worker)
     return worker
+
+
+class ProgressRelay(QObject):
+    """
+    Passed as a pipeline `progress` callback: calling it from a worker
+    thread emits `event`, which Qt delivers to connected slots on the
+    GUI thread (queued), so widgets can be updated directly from them.
+    """
+
+    event = Signal(object)  # orchestration.ProgressEvent
+
+    def __call__(self, progress_event) -> None:
+        self.event.emit(progress_event)

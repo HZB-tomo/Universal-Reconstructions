@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -31,14 +32,16 @@ from PySide6.QtWidgets import (
 
 from calibration import find_center, find_tilt, half_scan_slice
 from core.data_interface import DataInterface
-from orchestration import PipelineRun, load_config, save_config
+from orchestration import PipelineRun, ProgressEvent, load_config, save_config
 from preprocessing import build_reference, normalize_slice
 from reconstruction import get_backend, resolve_device
 
 from orchestration import ram_check
+from gui.reconstruct_dialog import ReconstructDestinationDialog
+from gui.reconstruct_plan import RememberedPaths, describe_error, make_plan, streaming_config
 from gui.session import ProjectSession
 from gui.viewer import ImageViewer
-from gui.workers import run_in_background
+from gui.workers import ProgressRelay, run_in_background
 
 # Sanity bounds, not hard limits: a real center of rotation is within
 # about 1-2% of the detector width from the image's geometric center,
@@ -680,10 +683,14 @@ class AdjustmentPanel(QWidget):
     status_message = Signal(str)
     busy_changed = Signal(bool)  # True when a background pipeline call starts, False when it ends
     session_changed = Signal(object)  # ProjectSession whose config just changed, for ProjectPanel.refresh()
+    volume_written = Signal(object)  # ProjectSession whose full volume was just streamed to session.volume_path
 
-    def __init__(self, viewer: ImageViewer, parent=None):
+    def __init__(self, viewer: ImageViewer, parent=None, paths: Optional[RememberedPaths] = None):
         super().__init__(parent)
         self.viewer = viewer
+        self.paths = paths if paths is not None else RememberedPaths()
+        self._relay = ProgressRelay(self)
+        self.progress_event = self._relay.event  # ProgressEvent from a running reconstruction, for the status box
         self.session: Optional[ProjectSession] = None
         self._workers: list = []
 
@@ -1130,14 +1137,14 @@ class AdjustmentPanel(QWidget):
             return
 
         if all_slices:
-            _, n_rows, width = DataInterface(session.run.project).shape_of("projections")
-            required = ram_check.estimate_volume_bytes(n_rows, width)
-            if not ram_check.fits_in_available_ram(required):
-                self.status_message.emit(
-                    f"reconstructing all {n_rows} slices needs roughly {ram_check.describe(required)} of RAM, "
-                    "not enough available -- refusing to start. Streaming a reconstruction to disk without "
-                    "holding the whole volume in memory isn't implemented yet."
-                )
+            if not session.imported:
+                self.status_message.emit("open and import the project before reconstructing")
+                return
+            path = self._ask_reconstruct_destination(session)
+            if path == "":
+                return  # cancelled, or refused (nothing fits and streaming isn't possible)
+            if path is not None:
+                self._reconstruct_streaming(session, path)
                 return
 
         session.config.rows = None if all_slices else slice(session.preview_row, session.preview_row + 1)
@@ -1149,11 +1156,17 @@ class AdjustmentPanel(QWidget):
 
         def done(volume: np.ndarray) -> None:
             self.busy_changed.emit(False)
+            self.progress_event.emit(ProgressEvent(
+                session.project_id, "Done", volume.shape[0], volume.shape[0],
+                resolve_device(session.config.reconstruction_backend, session.config.device),
+            ))
             self.reconstruct_slice_btn.setEnabled(True)
             self.reconstruct_all_btn.setEnabled(True)
             session.error = None
             if all_slices:
                 self.viewer.show_stack(volume)
+                session.ram_volume = volume
+                session.volume_path = None  # the in-memory volume is now the latest full reconstruction
             else:
                 self.viewer.show_image(volume[0])
                 self._last_preview_volume = volume[0]  # see SaveSettingsTab's "Use preview slice's range"
@@ -1174,6 +1187,88 @@ class AdjustmentPanel(QWidget):
             self.reconstruct_slice_btn.setEnabled(True)
             self.reconstruct_all_btn.setEnabled(True)
             session.error = str(exc)
-            self.status_message.emit(f"reconstruction failed: {exc}")
+            self.status_message.emit(f"reconstruction failed: {describe_error(exc)}")
+            self.progress_event.emit(ProgressEvent(session.project_id, "Failed", message=describe_error(exc)))
+            if isinstance(exc, MemoryError):
+                QMessageBox.warning(self, "Out of memory", describe_error(exc))
 
-        self._workers.append(run_in_background(_run_pipeline_to_reconstruction, session, on_finished=done, on_failed=failed))
+        def work() -> np.ndarray:
+            if session.run is not None:
+                session.run.progress = self._relay
+            return _run_pipeline_to_reconstruction(session)
+
+        self._workers.append(run_in_background(work, on_finished=done, on_failed=failed))
+
+    def _ask_reconstruct_destination(self, session: ProjectSession) -> Optional[str]:
+        """
+        Asks where the whole volume should go. Returns the HDF5 path to
+        stream into, None to reconstruct in memory, or "" if the user
+        cancelled or nothing is possible (a message has been shown).
+        """
+        di = DataInterface(session.run.project)
+        n_angles, n_rows, width = di.shape_of("projections")
+        plan = make_plan(n_angles, n_rows, width, di.get_metadata("geometry_type"))
+        if not plan.can_stream and not plan.fits_in_ram:
+            QMessageBox.warning(
+                self, "Not enough memory",
+                f"Reconstructing all {n_rows} slices needs about {ram_check.describe(plan.needed_bytes)} of RAM "
+                f"but only {ram_check.describe(plan.available_bytes)} is available, and {plan.stream_blocker}.",
+            )
+            return ""
+        dialog = ReconstructDestinationDialog(
+            session.project_id, plan, self.paths.default_volume_path(session.config), self,
+        )
+        if not dialog.exec():
+            return ""
+        path = dialog.chosen_path()
+        if path is not None:
+            self.paths.remember_volume_path(path)
+        return path
+
+    def _reconstruct_streaming(self, session: ProjectSession, path: str) -> None:
+        """Reconstructs the whole volume chunk by chunk into an HDF5
+        file (PipelineRun.stream()); the volume is never held in RAM."""
+        config, note = streaming_config(session.config, path)
+        self.status_message.emit(f"reconstructing all slices of {session.project_id} into {path} ...")
+        self.reconstruct_slice_btn.setEnabled(False)
+        self.reconstruct_all_btn.setEnabled(False)
+        self.busy_changed.emit(True)
+
+        def work() -> str:
+            session.run.complete()
+            streamer = PipelineRun(config, progress=self._relay)
+            streamer.project = session.run.project  # already imported; don't read the file again
+            return streamer.stream()
+
+        def done(written_path: str) -> None:
+            self.busy_changed.emit(False)
+            total = DataInterface(session.run.project).shape_of("projections")[1]
+            self.progress_event.emit(ProgressEvent(
+                session.project_id, "Done", total, total,
+                resolve_device(config.reconstruction_backend, config.device), f"written to {written_path}",
+            ))
+            self.reconstruct_slice_btn.setEnabled(True)
+            self.reconstruct_all_btn.setEnabled(True)
+            session.error = None
+            session.volume_path = written_path
+            session.volume_dataset = config.export_dataset_path
+            session.ram_volume = None
+            session.exported = True
+            message = f"reconstructed {session.project_id} into {written_path}"
+            if note:
+                message += f" -- {note}"
+            self.status_message.emit(message)
+            self.session_changed.emit(session)
+            self.volume_written.emit(session)
+
+        def failed(exc: Exception) -> None:
+            self.busy_changed.emit(False)
+            self.reconstruct_slice_btn.setEnabled(True)
+            self.reconstruct_all_btn.setEnabled(True)
+            session.error = str(exc)
+            self.status_message.emit(f"reconstruction failed: {describe_error(exc)}")
+            self.progress_event.emit(ProgressEvent(session.project_id, "Failed", message=describe_error(exc)))
+            if isinstance(exc, MemoryError):
+                QMessageBox.warning(self, "Out of memory", describe_error(exc))
+
+        self._workers.append(run_in_background(work, on_finished=done, on_failed=failed))

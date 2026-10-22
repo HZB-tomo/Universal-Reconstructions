@@ -30,8 +30,26 @@ def estimate_volume_bytes(n_rows: int, width: int) -> int:
     return n_rows * width * width * BYTES_PER_FLOAT32
 
 
+def estimate_inmemory_run_bytes(n_angles: int, n_rows: int, width: int) -> int:
+    """
+    Size in bytes of what a non-streaming reconstruction of `n_rows`
+    slices holds at once, before SAFETY_FACTOR: the normalized
+    sinogram stack, (n_angles, n_rows, width) float32, which
+    PipelineRun.preprocess() builds for every requested row up front,
+    plus the reconstructed volume itself. estimate_volume_bytes() alone
+    ignores the sinograms, which for a typical scan are as large as
+    the volume.
+    """
+    sinogram_bytes = n_angles * n_rows * width * BYTES_PER_FLOAT32
+    return sinogram_bytes + estimate_volume_bytes(n_rows, width)
+
+
+def available_bytes() -> int:
+    return psutil.virtual_memory().available
+
+
 def fits_in_available_ram(required_bytes: int) -> bool:
-    return psutil.virtual_memory().available >= required_bytes * SAFETY_FACTOR
+    return available_bytes() >= required_bytes * SAFETY_FACTOR
 
 
 def describe(num_bytes: int) -> str:

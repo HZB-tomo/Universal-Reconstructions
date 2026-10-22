@@ -8,11 +8,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDockWidget, QMainWindow, QProgressBar
+from PySide6.QtWidgets import QDockWidget, QFileDialog, QMainWindow, QProgressBar
 
 from core.data_interface import DataInterface
 from data_import.errors import AmbiguousVendorMatchError, NoVendorMatchError
-from orchestration import BatchReport, PipelineRun, PipelineStageError, ProjectConfig, run_batch
+from orchestration import BatchReport, PipelineRun, ProgressEvent, PipelineStageError, ProjectConfig, run_batch
 
 from orchestration import ram_check
 from gui.adjustment_panel import AdjustmentPanel
@@ -20,9 +20,11 @@ from gui.convert_dialog import ConvertDialog
 from gui.import_dialog import ImportDialog
 from gui.plugin_picker_dialog import PluginPickerDialog
 from gui.project_panel import ProjectPanel
+from gui.reconstruct_plan import RememberedPaths, describe_error, save_ram_volume
 from gui.session import ProjectSession, unique_project_id
 from gui.viewer import ImageViewer
-from gui.workers import run_in_background
+from gui.volume_view import open_volume
+from gui.workers import ProgressRelay, run_in_background
 
 
 class MainWindow(QMainWindow):
@@ -36,8 +38,17 @@ class MainWindow(QMainWindow):
         self.viewer = ImageViewer(self)
         self.setCentralWidget(self.viewer)
 
+        # Output folders chosen this session, shared so a later action
+        # (e.g. one path for all selected projects) can reuse them.
+        self.paths = RememberedPaths()
+
+        # Pipeline progress from import and from "Reconstruct selected"; the adjustment panel
+        # has its own relay for its reconstructions. All feed the status box.
+        self._progress = ProgressRelay(self)
+        self._progress.event.connect(self._on_progress)
+
         self.project_panel = ProjectPanel(self)
-        self.adjustment_panel = AdjustmentPanel(self.viewer, self)
+        self.adjustment_panel = AdjustmentPanel(self.viewer, self, paths=self.paths)
 
         # Not closable -- there's no way back in once closed (no View
         # menu/toolbar toggle exists), so a user who closes one by
@@ -56,12 +67,16 @@ class MainWindow(QMainWindow):
 
         self.project_panel.project_opened.connect(self._open_project)
         self.project_panel.reconstruct_selected_requested.connect(self._reconstruct_selected)
+        self.project_panel.save_requested.connect(self._save_sessions)
         self.project_panel.sessions_removed.connect(self._on_sessions_removed)
         self.project_panel.settings_pasted.connect(self._on_settings_pasted)
         self.project_panel.config_exported.connect(self._on_config_exported)
         self.adjustment_panel.status_message.connect(self._show_status)
         self.adjustment_panel.busy_changed.connect(self._on_busy_changed)
         self.adjustment_panel.session_changed.connect(self.project_panel.refresh)
+        self.adjustment_panel.volume_written.connect(self._show_reconstruction)
+        self.adjustment_panel.progress_event.connect(self._on_progress)
+        self.project_panel.reconstruction_opened.connect(self._show_reconstruction)
 
         # Indeterminate (no known percentage) -- every pipeline call is
         # start/finish only, not real progress. Visible only while at
@@ -145,7 +160,7 @@ class MainWindow(QMainWindow):
 
     def _import_session(self, session: ProjectSession) -> None:
         def work() -> PipelineRun:
-            run = PipelineRun(session.config)
+            run = PipelineRun(session.config, progress=self._progress)
             run.import_data()
             try:
                 run.complete()
@@ -157,11 +172,13 @@ class MainWindow(QMainWindow):
             self._pop_busy()
             session.run = run
             self.project_panel.refresh(session)
+            self._on_progress(ProgressEvent(session.project_id, "Done", message="imported"))
             self._show_status(f"imported {session.project_id}")
 
         def failed(exc: Exception) -> None:
             self._pop_busy()
             session.error = str(exc)
+            self._on_progress(ProgressEvent(session.project_id, "Failed", message=str(exc)))
             self.project_panel.refresh(session)
             self._show_status(f"import failed for {session.project_id}: {exc}")
             # session.config.plugin_name already set means the user
@@ -210,7 +227,7 @@ class MainWindow(QMainWindow):
             if not session.imported:
                 skipped.append(f"{session.project_id}: still importing")
                 continue
-            _, n_rows, width = DataInterface(session.run.project).shape_of("projections")
+            n_angles, n_rows, width = DataInterface(session.run.project).shape_of("projections")
 
             # Save settings' from/to slice range and crop box are GUI-only
             # (ProjectSession.export_rows/export_crop_yx) until this exact
@@ -238,7 +255,7 @@ class MainWindow(QMainWindow):
             # estimate below doesn't apply; it manages its own,
             # per-chunk memory footprint instead.
             if not session.config.stream:
-                required = ram_check.estimate_volume_bytes(effective_n_rows, width)
+                required = ram_check.estimate_inmemory_run_bytes(n_angles, effective_n_rows, width)
                 if not ram_check.fits_in_available_ram(required):
                     skipped.append(
                         f"{session.project_id}: needs roughly {ram_check.describe(required)}, not enough RAM "
@@ -258,14 +275,24 @@ class MainWindow(QMainWindow):
             self._pop_busy()
             succeeded = [r.project_id for r in report.succeeded]
             failed_results = [(r.project_id, r.error) for r in report.failed]
+            volume_paths = {r.project_id: r for r in report.succeeded}
             for project_id in succeeded:
                 session = sessions_by_id.get(project_id)
                 if session is not None:
                     session.exported = True
+                    result = volume_paths[project_id]
+                    if result.config.export_format == "hdf5" and result.volume_path:
+                        session.volume_path = result.volume_path  # shows up in the "Reconstructed" row
+                        session.volume_dataset = result.config.export_dataset_path
+                        session.ram_volume = None
                     self.project_panel.refresh(session)
             message = f"reconstruct selected: {len(succeeded)} succeeded"
             if failed_results:
                 message += f", {len(failed_results)} failed (" + "; ".join(f"{pid}: {err}" for pid, err in failed_results) + ")"
+            self._on_progress(ProgressEvent(
+                "selected projects", "Failed" if failed_results and not succeeded else "Done",
+                message=f"{len(succeeded)} succeeded, {len(failed_results)} failed",
+            ))
             self._show_status(message)
 
         def failed(exc: Exception) -> None:
@@ -274,7 +301,74 @@ class MainWindow(QMainWindow):
 
         self._show_status(f"reconstructing {len(configs)} selected project(s) ...")
         self._push_busy()
-        self._workers.append(run_in_background(run_batch, configs, on_finished=done, on_failed=failed))
+        self._workers.append(run_in_background(run_batch, configs, progress=self._progress, on_finished=done, on_failed=failed))
+
+    # -- saving in-memory reconstructions -----------------------------------------
+
+    def _save_sessions(self, sessions: list) -> None:
+        """Writes each session's in-memory reconstruction to an HDF5 file:
+        one chosen file for a single project, one file per project in a
+        chosen folder for several. Nothing is overwritten (see unique_path())."""
+        todo, skipped = [], []
+        for session in sessions:
+            if session.ram_volume is None:
+                skipped.append(f"{session.project_id}: no reconstruction in memory")
+            elif session.volume_path is not None:
+                skipped.append(f"{session.project_id}: already saved to {session.volume_path}")
+            else:
+                todo.append(session)
+        if not todo:
+            self._show_status("nothing to save -- " + ("; ".join(skipped) if skipped else "no projects selected"))
+            return
+
+        if len(todo) == 1:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save reconstruction", self.paths.default_volume_path(todo[0].config), "HDF5 files (*.h5 *.hdf5)",
+                options=QFileDialog.DontConfirmOverwrite,
+            )
+            if not path:
+                return
+            targets = [(todo[0], path)]
+            self.paths.remember_volume_path(path)
+        else:
+            start = self.paths.volume_dir or str(Path(todo[0].config.path).parent)
+            folder = QFileDialog.getExistingDirectory(self, "Save reconstructions into folder", start)
+            if not folder:
+                return
+            targets = [(s, str(Path(folder) / f"{s.project_id}_volume.h5")) for s in todo]
+            self.paths.remember_volume_path(targets[0][1])
+
+        def work() -> list:
+            saved = []
+            for session, path in targets:
+                settings = {**session.run.project.export_metadata(), **session.run.settings}
+                written = save_ram_volume(
+                    session.ram_volume, path, settings, session.volume_dataset,
+                    progress=self._progress, project_id=session.project_id,
+                )
+                saved.append((session, written))
+            return saved
+
+        def done(saved: list) -> None:
+            self._pop_busy()
+            for session, written in saved:
+                session.volume_path = written
+                session.volume_dataset = "/volume"
+                self.project_panel.refresh(session)
+            self._on_progress(ProgressEvent(saved[-1][0].project_id, "Done", message=f"saved {len(saved)} reconstruction(s)"))
+            message = "saved: " + "; ".join(f"{s.project_id} -> {p}" for s, p in saved)
+            if skipped:
+                message += " | skipped: " + "; ".join(skipped)
+            self._show_status(message)
+
+        def failed(exc: Exception) -> None:
+            self._pop_busy()
+            self._on_progress(ProgressEvent("save", "Failed", message=describe_error(exc)))
+            self._show_status(f"save failed: {describe_error(exc)}")
+
+        self._show_status(f"saving {len(targets)} reconstruction(s) ...")
+        self._push_busy()
+        self._workers.append(run_in_background(work, on_finished=done, on_failed=failed))
 
     # -- opening a project ------------------------------------------------------
 
@@ -292,9 +386,30 @@ class MainWindow(QMainWindow):
         # get_projections() with no index would read the entire stack
         # just to open the project, defeating storage_mode="disk"
         # entirely.
-        self.viewer.show_stack_lazy(di.get_projections, n_angles)
+        self.viewer.show_stack_lazy(di.get_projections, n_angles, shape=di.shape_of("projections"), kind="projections")
         self.adjustment_panel.set_session(session)
         self._show_status(f"opened {session.project_id}")
+
+    def _show_reconstruction(self, session: ProjectSession) -> None:
+        """Shows the project's full reconstruction (in-memory or from its
+        HDF5 file) in the viewer instead of its projections."""
+        if session.ram_volume is not None:
+            self.viewer.show_stack(session.ram_volume)
+        elif session.volume_path is not None:
+            try:
+                get_section, shape = open_volume(session.volume_path, session.volume_dataset)
+            except (OSError, KeyError) as e:
+                self._show_status(f"can't open reconstruction of {session.project_id} ({session.volume_path}): {e}")
+                return
+            self.viewer.show_stack_lazy(get_section, shape[0], shape=shape)
+        else:
+            self._show_status(f"{session.project_id} has no full reconstruction yet -- use 'Reconstruct all slices'")
+            return
+        self.adjustment_panel.set_session(session)
+        self._show_status(f"showing reconstruction of {session.project_id}")
+
+    def _on_progress(self, event: ProgressEvent) -> None:
+        self.project_panel.status_box.on_progress(event)
 
     def _show_status(self, message: str) -> None:
         self.statusBar().showMessage(message)

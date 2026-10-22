@@ -20,9 +20,10 @@ from orchestration.batch import BatchReport, run_batch, validate_config
 from orchestration.config import PipelineStageError, ProjectConfig
 from orchestration.config_ini import load_config, resolve_config, save_config, write_config_template
 from orchestration.pipeline import PipelineResult, PipelineRun
+from orchestration.progress import ProgressEvent
 
 __all__ = [
     "ProjectConfig", "PipelineStageError", "PipelineRun", "PipelineResult",
     "load_config", "save_config", "write_config_template", "resolve_config",
-    "validate_config", "run_batch", "BatchReport",
+    "validate_config", "run_batch", "BatchReport", "ProgressEvent",
 ]

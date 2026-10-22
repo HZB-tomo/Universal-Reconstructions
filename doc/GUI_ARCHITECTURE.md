@@ -189,14 +189,27 @@ the project name:
 | importing | blue | `session.run is None`, `session.error is None` |
 | error | red | `session.run is None`, `session.error` set |
 | needs_input | orange | `project.needs_user_input()` |
-| ready | gray | resolved, not yet reconstructed |
-| reconstructed | green | `run.volume is not None`, or `session.exported` |
+| ready | gray | resolved ("ready for reconstruction"); a single-slice preview does not change this |
+| reconstructed | green | `session.exported`, `volume_path` or `ram_volume` set (a full reconstruction) |
 
 `session.exported` is set by `MainWindow._reconstruct_selected()`'s
 `done()` handler for each session `run_batch()` reports successful --
 `run_batch()` builds its own internal `PipelineRun` per config and
 never hands back the volume, so `session.run.volume` stays `None` even
 after a successful batch export.
+
+## Status box
+
+`StatusBox` (`gui/status_box.py`), always visible at the bottom of the
+project panel: project, stage, device (CPU/GPU), a progress bar and
+"N / total slices reconstructed, M left". Fed by `orchestration.ProgressEvent`s:
+`PipelineRun(config, progress=callback)` and `run_batch(configs, progress=...)`
+report each stage (importing, completing, normalizing, calibrating,
+reconstructing, postprocessing, writing); a streamed run also reports
+slices done per chunk. Events come from worker threads, so the GUI passes a
+`ProgressRelay` (a Qt signal) as the callback. Stages without a slice count
+(eager runs) show an indeterminate bar. The status bar still shows
+one-line messages.
 
 ## Adjustment panel
 
@@ -358,7 +371,30 @@ clips it silently wherever `config.crop` is applied in
 | Reconstruct all slices | Adjustment | one project, every row | `None` |
 | Reconstruct selected | Project | every checked project | per project, from Save settings' `export_rows` |
 
-Both adjustment-panel actions call `_run_pipeline_to_reconstruction()`:
+**Reconstruct all slices** first asks where the volume should go
+(`ReconstructDestinationDialog`, numbers from `gui/reconstruct_plan.py`):
+it shows available RAM against the estimated need (normalized
+sinograms plus volume, with `SAFETY_FACTOR`), and offers
+
+- *Write to an HDF5 file (streamed)*: runs `PipelineRun.stream()` on the
+  already-imported project, one chunk of slices at a time, so the volume
+  never sits in RAM. Parallel-beam only (cone-beam slices need
+  neighbouring detector rows, so row chunking doesn't apply); the option is
+  disabled otherwise. A uint16 setting without Clip min/max is written
+  as float32. The chosen folder is remembered (`RememberedPaths`, in
+  memory only) as the default for later reconstructions.
+- *Keep in memory only*: the old path; disabled when it doesn't fit.
+
+If neither fits (e.g. cone-beam, low RAM) a message box says so. A
+`MemoryError` during a run is reported by name instead of an empty
+message. Single-slice previews are unchanged.
+
+When a full reconstruction exists (streamed file, in-memory volume, or a
+`Reconstruct selected` HDF5 export) the project's **Reconstructed** row
+shows it; double-clicking that row shows the volume in the viewer
+(slice by slice from the file) instead of the projections.
+
+Both preview actions call `_run_pipeline_to_reconstruction()`:
 `import_data()` if not already done, `complete()`, `preprocess()`,
 `calibrate()`, `reconstruct()`. Neither exports; both only update
 `self.viewer`.
@@ -420,6 +456,18 @@ shared path (`_set_source()`/`_show_frame()`/`_frame_at()`):
   `get_projections(index=i)` reads just one h5py slice or one tiff
   file, for either storage mode.
 
+**z / y / x buttons** above the image choose the slicing direction
+(`gui/slicing.py`); they look like push buttons but act as radio buttons
+(the chosen one stays pushed). z (default) is the stack's first axis, y
+and x are the other two. For raw projections `(angle, row, column)` that
+makes y the **sinogram** of one detector row and x an angle-by-row image;
+for a volume they are the xz and yz sections. A new source always starts
+in z, and a y/x switch starts at the middle section. They need the
+stack's full shape (`show_stack_lazy(..., shape=...)`), so a single
+preview slice only has z. The crop box is an xy rectangle: it is drawn
+only in the z view, and turning crop on switches back to z. TIFF
+projections read every file for a y/x section, so scrubbing those is slow.
+
 Scrubbing the slider does not reset zoom/pan/contrast; loading a new
 source does.
 
@@ -440,3 +488,4 @@ frame, cached so hovering doesn't trigger a disk read in lazy mode).
   viewer/Basic settings for whichever project is open when it lands.
 - `ProjectObject.close()` (releases a disk-mode project's open
   `h5py.File`) is never called.
+- Reconstructed row: no "choose one path for all selected projects" yet.

@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
+
 from orchestration import PipelineRun, ProjectConfig
 
 
@@ -38,6 +40,13 @@ class ProjectSession:
     # translate into.
     export_rows: Optional[tuple[int, int]] = None
     export_crop_yx: Optional[tuple[int, int, int, int]] = None
+    # The project's full reconstruction, for the project panel's
+    # "Reconstructed" row: an HDF5 file it was streamed/exported to, or
+    # (Reconstruct all slices, "Keep in memory only") the array itself.
+    # Single-slice previews set neither.
+    volume_path: Optional[str] = None
+    volume_dataset: str = "/volume"
+    ram_volume: Optional[np.ndarray] = None
 
     @property
     def project_id(self) -> str:

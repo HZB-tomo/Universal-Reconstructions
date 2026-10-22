@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -27,12 +27,13 @@ from data_import.importer import DataImporter
 from data_import.plugin import get_plugin
 from preprocessing import build_reference, normalize_rows, process_volume, remove_ring_artifacts, remove_zinger
 from reconstruction import (
-    Geometry, StreamingVolumeWriter, reconstruct, reconstruct_rotated, save_volume,
+    Geometry, resolve_device, StreamingVolumeWriter, reconstruct, reconstruct_rotated, save_volume,
     supports_exact_rotation, to_uint16,
 )
 
 from orchestration import ram_check
 from orchestration.config import PipelineStageError, ProjectConfig
+from orchestration.progress import ProgressEvent
 
 
 @dataclass
@@ -46,9 +47,13 @@ class PipelineResult:
 
 
 class PipelineRun:
-    def __init__(self, config: ProjectConfig, interactive: bool = False):
+    def __init__(
+        self, config: ProjectConfig, interactive: bool = False,
+        progress: Optional[Callable[[ProgressEvent], None]] = None,
+    ):
         self.config = config
         self.interactive = interactive
+        self.progress = progress
         self.project_id = config.resolved_project_id()
 
         self.project: Optional[ProjectObject] = None
@@ -63,9 +68,17 @@ class PipelineRun:
     def _log(self, message: str) -> None:
         self.log.append(message)
 
+    def _report(self, stage: str, done: Optional[int] = None, total: Optional[int] = None, device: Optional[str] = None) -> None:
+        if self.progress is not None:
+            self.progress(ProgressEvent(self.project_id, stage, done, total, device))
+
+    def _device(self) -> str:
+        return resolve_device(self.config.reconstruction_backend, self.config.device)
+
     # -- stages -----------------------------------------------------------
 
     def import_data(self) -> ProjectObject:
+        self._report("Importing")
         try:
             plugin = get_plugin(self.config.format, self.config.plugin_name) if self.config.plugin_name else None
             self.project = DataImporter().import_project(
@@ -79,6 +92,7 @@ class PipelineRun:
         return self.project
 
     def complete(self) -> None:
+        self._report("Completing metadata")
         completion.run(self.project)
         for key, value in self.config.completion_answers.items():
             completion.provide(self.project, key, value)
@@ -95,6 +109,7 @@ class PipelineRun:
         self._log("completion resolved")
 
     def preprocess(self) -> np.ndarray:
+        self._report("Normalizing projections")
         self.reference = build_reference(
             self.project, reducer=self.config.reference_reducer, dark_offset=self.config.dark_offset,
             already_normalized=self.config.projections_normalized,
@@ -118,6 +133,7 @@ class PipelineRun:
         return self.normalized
 
     def calibrate(self) -> None:
+        self._report("Calibrating")
         n_rows = self.normalized.shape[1]
         reference_row = (n_rows - 1) / 2.0
         middle_row = int(round(reference_row))
@@ -170,27 +186,50 @@ class PipelineRun:
             detector_pixel_size=di.get_metadata("detector_pixel_size"),
         )
         angles = di.get_metadata("angles")
+        device = self._device()
+        n_rows = self.normalized.shape[1]
+        self._report("Reconstructing", 0, n_rows, device)
 
-        if self.config.rotate_deg:
-            self.volume = reconstruct_rotated(
-                self.normalized, angles, self.centers, geometry=geometry,
-                backend=self.config.reconstruction_backend, rotate_deg=self.config.rotate_deg,
-                device=self.config.device, **self.config.reconstruction_options,
-            )
-            self.settings["rotate_deg"] = self.config.rotate_deg
-            method = "sinogram reorder" if supports_exact_rotation(angles, geometry.geometry_type) else "image-domain fallback"
-            self._log(f"rotated {self.config.rotate_deg}deg via {method}")
-        else:
-            self.volume = reconstruct(
-                self.normalized, angles, self.centers, geometry=geometry,
+        def reconstruct_rows(sinograms, centers):
+            if self.config.rotate_deg:
+                return reconstruct_rotated(
+                    sinograms, angles, centers, geometry=geometry,
+                    backend=self.config.reconstruction_backend, rotate_deg=self.config.rotate_deg,
+                    device=self.config.device, **self.config.reconstruction_options,
+                )
+            return reconstruct(
+                sinograms, angles, centers, geometry=geometry,
                 backend=self.config.reconstruction_backend, device=self.config.device,
                 **self.config.reconstruction_options,
             )
+
+        # Rows are independent (parallel beam), so with a progress
+        # callback the stack is reconstructed a chunk of rows at a time
+        # -- same result, but the caller sees slices-done advance.
+        chunk_rows = ram_check.estimate_chunk_rows(self.normalized.shape[2], n_rows) if self.progress is not None else n_rows
+        if chunk_rows >= n_rows:
+            self.volume = reconstruct_rows(self.normalized, self.centers)
+        else:
+            self.volume = None
+            for start in range(0, n_rows, chunk_rows):
+                stop = min(start + chunk_rows, n_rows)
+                centers = self.centers[start:stop] if np.ndim(self.centers) else self.centers
+                part = reconstruct_rows(self.normalized[:, start:stop, :], centers)
+                if self.volume is None:
+                    self.volume = np.empty((n_rows,) + part.shape[1:], dtype=part.dtype)
+                self.volume[start:stop] = part
+                self._report("Reconstructing", stop, n_rows, device)
+
+        if self.config.rotate_deg:
+            self.settings["rotate_deg"] = self.config.rotate_deg
+            method = "sinogram reorder" if supports_exact_rotation(angles, geometry.geometry_type) else "image-domain fallback"
+            self._log(f"rotated {self.config.rotate_deg}deg via {method}")
         self.settings["backend"] = self.config.reconstruction_backend
         self._log(f"reconstructed volume {self.volume.shape}")
         return self.volume
 
     def postprocess(self) -> np.ndarray:
+        self._report("Postprocessing")
         if self.config.dtype == "uint16":
             self.volume, clip_record = to_uint16(
                 self.volume, self.config.dtype_clip_min, self.config.dtype_clip_max,
@@ -206,6 +245,7 @@ class PipelineRun:
         return self.volume
 
     def export(self) -> str:
+        self._report("Writing volume")
         template = self.config.export_path or self._default_export_path_template()
         path = self._resolve_export_path(template)
 
@@ -245,6 +285,14 @@ class PipelineRun:
             )
 
     # -- streaming (chunk-at-a-time) reconstruction --------------------------
+
+    def stream(self) -> str:
+        """Public entry point for the streaming path, for a caller (the
+        GUI) that has already imported/completed `self.project` and
+        just wants it reconstructed to disk. Returns the path written,
+        which can differ from config.export_path if that already
+        existed (see _resolve_export_path())."""
+        return self._run_streaming()
 
     def _run_streaming(self) -> str:
         """
@@ -383,6 +431,8 @@ class PipelineRun:
             **self.config.export_extra_settings,
         }
         out_dtype = np.uint16 if self.config.dtype == "uint16" else np.float32
+        device = self._device()
+        self._report("Preparing", 0, total_rows, device)
 
         writer = StreamingVolumeWriter(
             path, format=self.config.export_format, total_slices=out_total_rows,
@@ -398,6 +448,7 @@ class PipelineRun:
                 if write_start >= write_stop:
                     continue  # this whole chunk falls outside config.crop's z-range
 
+                self._report("Normalizing projections", rel_start, total_rows, device)
                 chunk = normalize_rows(self.project, slice(chunk_start, chunk_stop), self.reference)
                 if self.config.zinger_removal:
                     chunk = process_volume(
@@ -411,6 +462,7 @@ class PipelineRun:
                         method=self.config.ring_method, **self.config.ring_options,
                     )
 
+                self._report("Reconstructing", rel_start, total_rows, device)
                 chunk_centers = center if tilt_deg == 0.0 else centers_for_rows(
                     tilt_deg, center, reference_row, np.arange(rel_start, rel_stop),
                 )
@@ -436,7 +488,9 @@ class PipelineRun:
                 # z-range actually keeps, then place it at that range's
                 # own 0-based offset -- see the docstring above.
                 chunk_volume = chunk_volume[write_start - rel_start:write_stop - rel_start]
+                self._report("Writing", rel_start, total_rows, device)
                 writer.write_chunk(chunk_volume, z_offset=write_start - z0)
+                self._report("Writing", rel_stop, total_rows, device)
                 self._log(f"streamed rows {chunk_start}:{chunk_stop} ({chunk_stop - chunk_start} slices)")
         finally:
             writer.close()

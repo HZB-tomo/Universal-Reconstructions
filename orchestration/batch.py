@@ -59,7 +59,7 @@ class BatchReport:
         return [r for r in self.results if not r.success]
 
 
-def run_batch(configs: list) -> BatchReport:
+def run_batch(configs: list, progress=None) -> BatchReport:
     validation_problems = {}
     for config in configs:
         problems = validate_config(config)
@@ -68,7 +68,7 @@ def run_batch(configs: list) -> BatchReport:
 
     results = []
     for config in configs:
-        run = PipelineRun(config, interactive=False)
+        run = PipelineRun(config, interactive=False, progress=progress)
         try:
             result = run.run_all()
         except Exception as e:

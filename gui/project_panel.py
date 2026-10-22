@@ -18,6 +18,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
+    QHBoxLayout,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -30,9 +31,11 @@ from PySide6.QtWidgets import (
 from orchestration import save_config
 from gui.copy_settings_dialog import CopySettingsDialog
 from gui.session import ProjectSession
+from gui.status_box import StatusBox
 from gui.settings_clipboard import ALL_COPYABLE_FIELDS, copy_settings, paste_settings
 
-INFO_FIELDS = ("Status", "Center of rotation", "Tilt", "Format", "Storage")
+INFO_FIELDS = ("Status", "Center of rotation", "Tilt", "Format", "Storage", "Reconstructed")
+RECONSTRUCTED_FIELD = "Reconstructed"  # double-clicking this row shows the reconstruction instead of the projections
 
 # error: import itself never produced a project (no plugin matched, or
 # some other exception) -- not fixable from this panel, a genuinely
@@ -62,17 +65,28 @@ def _status_of(session: ProjectSession) -> tuple[str, str]:
     if session.run.project.needs_user_input():
         missing = ", ".join(session.run.project.missing_soft_fields())
         return "needs_input", f"needs input: {missing}"
-    if session.exported or session.run.volume is not None:
+    # Only a full reconstruction counts; a single-slice preview leaves
+    # run.volume set but the project is still waiting for its real one.
+    if session.exported or session.volume_path is not None or session.ram_volume is not None:
         return "reconstructed", "reconstructed"
-    return "ready", "ready"
+    return "ready", "ready for reconstruction"
 
 
-def _info_values(session: ProjectSession) -> tuple[str, str, str, str, str]:
+def _reconstructed_label(session: ProjectSession) -> str:
+    if session.ram_volume is not None:
+        saved = f", saved to {session.volume_path}" if session.volume_path is not None else ""
+        return f"in memory ({session.ram_volume.shape[0]} slices{saved}) - double-click to view"
+    if session.volume_path is not None:
+        return f"{session.volume_path} - double-click to view"
+    return "-"
+
+
+def _info_values(session: ProjectSession) -> tuple[str, str, str, str, str, str]:
     _, status_label = _status_of(session)
     config = session.config
     center = f"{config.center:.2f}" if config.center is not None else "auto"
     tilt = f"{config.tilt_deg:.3f}" if config.tilt_deg is not None else "auto"
-    return status_label, center, tilt, config.format, config.storage_mode
+    return status_label, center, tilt, config.format, config.storage_mode, _reconstructed_label(session)
 
 
 class ProjectPanel(QWidget):
@@ -81,6 +95,8 @@ class ProjectPanel(QWidget):
     sessions_removed = Signal(list)  # list[ProjectSession] just deleted, for MainWindow to clear if one was open
     settings_pasted = Signal(list)  # list[ProjectSession] just pasted onto, for MainWindow to refresh if one was open
     config_exported = Signal(list)  # list[ProjectSession] whose config .ini was just written
+    save_requested = Signal(list)  # list[ProjectSession] whose in-memory reconstruction should be saved, see MainWindow._save_sessions()
+    reconstruction_opened = Signal(object)  # ProjectSession whose "Reconstructed" row was double-clicked
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -98,11 +114,19 @@ class ProjectPanel(QWidget):
 
         self.reconstruct_selected_btn = QPushButton("Reconstruct selected", self)
         self.reconstruct_selected_btn.clicked.connect(self.reconstruct_selected_requested)
+        self.save_selected_btn = QPushButton("Save selected", self)
+        self.save_selected_btn.setToolTip("Save the in-memory reconstructions of the checked projects to HDF5 files.")
+        self.save_selected_btn.clicked.connect(lambda: self.save_requested.emit(self.checked_sessions()))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.tree)
-        layout.addWidget(self.reconstruct_selected_btn)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.reconstruct_selected_btn)
+        buttons.addWidget(self.save_selected_btn)
+        layout.addLayout(buttons)
+        self.status_box = StatusBox(self)  # always visible; fed by MainWindow from the pipeline's progress events
+        layout.addWidget(self.status_box)
 
     def add_session(self, session: ProjectSession) -> None:
         item = QTreeWidgetItem([session.project_id, ""])
@@ -161,7 +185,11 @@ class ProjectPanel(QWidget):
     def _on_item_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         top_level = item.parent() or item
         session = top_level.data(0, Qt.UserRole)
-        if session is not None:
+        if session is None:
+            return
+        if item.parent() is not None and item.text(0) == RECONSTRUCTED_FIELD:
+            self.reconstruction_opened.emit(session)
+        else:
             self.project_opened.emit(session)
 
     # -- right-click menu: delete / copy / paste settings --------------------
@@ -196,6 +224,9 @@ class ProjectPanel(QWidget):
         paste_action.setEnabled(self._clipboard is not None)
 
         menu.addSeparator()
+        save_plural = "s" if len(sessions) > 1 else ""
+        save_action = menu.addAction(f"Save reconstruction{save_plural}...", lambda: self.save_requested.emit(sessions))
+        save_action.setEnabled(any(s.ram_volume is not None for s in sessions))
         config_plural = "s" if len(sessions) > 1 else ""
         menu.addAction(f"Export config{config_plural}", lambda: self._export_configs(sessions))
         if len(sessions) == 1:
