@@ -245,8 +245,19 @@ reconstruction-ready sinograms.
   `parallel_process_slices()`. Each function imports `algotom` lazily
   and raises `ImportError` if it is missing.
 
+- `beam_hardening.py`: polynomial linearization of beam-hardened (polychromatic)
+  attenuation (`correct_beam_hardening()`), with fits from a calibration or a
+  spectrum. Pure numpy. See [`BEAM_HARDENING.md`](./BEAM_HARDENING.md).
+- `phase.py`: propagation-based phase retrieval (Paganin), pure numpy/scipy.
+  A 2D filter across rows, so a block of rows needs a halo
+  (`phase_halo_rows()`); methods register like reconstruction backends. See
+  [`PHASE_RETRIEVAL.md`](./PHASE_RETRIEVAL.md).
+
 `preprocessing/` functions are pure: array in, array out. Nothing is
-written back onto `ProjectObject`.
+written back onto `ProjectObject`. The order they run in, and the halo
+handling, live in `orchestration/preprocess.py`'s `preprocess_rows()`
+(normalize -> zinger -> phase retrieval -> ring removal -> beam hardening), shared by whole
+runs, streamed chunks and the GUI's single-slice previews.
 
 ## `calibration/` in detail
 
@@ -277,6 +288,9 @@ Turns normalized sinograms into reconstructed images. Does not take a
   `preprocessing.normalize_rows()`'s output; output is
   `(n_slices, height, width)`, matching this codebase's volume
   convention.
+- `backends/rtk_fdk.py`: cone-beam FDK on the CPU through the Reconstruction Toolkit (`itk-rtk`, the
+  `cone` extra); takes the whole projection stack. See [`CONE_BEAM.md`](./CONE_BEAM.md).
+  `orchestration/geometry.py` builds the `Geometry` for every run, including the cone-beam detector pitch.
 - `backends/gridrec.py`: a thin wrapper over the separate `urct_gridrec`
   package (`gridrec_project/`), the project's own fast gridrec; optional,
   installed with the `gridrec` extra.

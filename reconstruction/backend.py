@@ -53,12 +53,31 @@ class ReconstructionBackend(ABC):
                                is_available() is False, so the GUI leaves
                                it out of the algorithm list instead of
                                offering a choice that can only fail.
+        filters:              the reconstruction filters (`filter_name`
+                               option) this backend accepts, e.g. ("ramp",
+                               "hann"); empty if it has no filter step
+                               (iterative methods). reconstruct() rejects
+                               other names, and the GUI shows a Filter
+                               choice only when this is not empty.
+        default_filter:       the one used when no filter is chosen.
+        install_hint:         how to install what `requires` names, shown by
+                               the GUI next to the greyed-out entry.
     """
 
     name: str
     supported_geometries: set
     is_iterative: bool = False
     requires: tuple = ()
+    filters: tuple = ()
+    default_filter: Optional[str] = None
+    install_hint: str = ""
+
+    def unavailable_reason(self) -> str:
+        """Empty when usable; otherwise what is missing and, if known, how to get it."""
+        missing = self.missing_requirements()
+        if not missing:
+            return ""
+        return f"needs {', '.join(missing)} (not installed)" + (f". {self.install_hint}" if self.install_hint else "")
 
     def missing_requirements(self) -> list:
         """The modules from `requires` that cannot be imported right now."""
@@ -142,14 +161,18 @@ def get_backend(name: str) -> ReconstructionBackend:
 # then the rest of the built-ins; backends not named here (yours) follow alphabetically.
 _DISPLAY_ORDER = (
     "algotom_fbp", "gridrec", "algotom_bpf", "algotom_dfi", "algotom_bp",
-    "algotom_sirt", "algotom_sart", "algotom_art", "algotom_cgls", "algotom_gridrec",
+    "algotom_sirt", "algotom_sart", "algotom_art", "algotom_cgls", "algotom_gridrec", "rtk_fdk",
 )
 
 
-def list_backends(available_only: bool = True) -> list:
+def list_backends(available_only: bool = True, geometry: Optional[str] = None) -> list:
     """Registered backend names, in display order. With available_only (the
-    default), backends whose required packages are not installed are left out."""
-    names = [n for n, b in _REGISTRY.items() if not available_only or b.is_available()]
+    default), backends whose required packages are not installed are left out;
+    with `geometry` ("parallel" / "cone"), so are backends that do not support it."""
+    names = [
+        n for n, b in _REGISTRY.items()
+        if (not available_only or b.is_available()) and (geometry is None or geometry in b.supported_geometries)
+    ]
     known = [n for n in _DISPLAY_ORDER if n in names]
     return known + sorted(n for n in names if n not in _DISPLAY_ORDER)
 

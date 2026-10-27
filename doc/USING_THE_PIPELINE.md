@@ -166,6 +166,33 @@ scales the projections by their air level (98th percentile).
 
 `-log()` is not applied here; it happens at or inside reconstruction.
 
+### Phase retrieval (optional)
+
+For propagation-based phase-contrast data (a coherent beam and a detector some distance
+behind the sample), `retrieve_phase()` removes the edge fringes before reconstruction:
+
+```python
+from preprocessing import retrieve_phase
+
+T = retrieve_phase(T, energy_kev=25, distance_mm=120, pixel_um=1.1, delta_over_beta=200)
+```
+
+See [`PHASE_RETRIEVAL.md`](./PHASE_RETRIEVAL.md) for the physics, the settings in a run, and why
+blocks of rows need a halo.
+
+### Beam hardening correction (optional)
+
+For a beam with many energies (a laboratory tube, a white beam), `correct_beam_hardening()`
+removes the cupping of uniform objects with a polynomial of the attenuation:
+
+```python
+from preprocessing import correct_beam_hardening
+
+T = correct_beam_hardening(T, coefficients=(1.0, 0.3, -0.02))
+```
+
+See [`BEAM_HARDENING.md`](./BEAM_HARDENING.md) for the physics and for finding the coefficients.
+
 ### Zinger and ring-artifact removal (optional)
 
 ```python

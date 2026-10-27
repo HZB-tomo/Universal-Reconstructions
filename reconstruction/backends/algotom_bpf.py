@@ -19,6 +19,8 @@ class AlgotomBpfBackend(ReconstructionBackend):
     name = "algotom_bpf"
     supported_geometries = {"parallel"}
     requires = ("algotom",)
+    filters = ("ramp", "hann", "hamming", "bartlett", "blackman", "nuttall", "parzen", "triang")
+    default_filter = "hann"
 
     def reconstruct(
         self,

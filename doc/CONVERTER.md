@@ -55,23 +55,31 @@ Binning functions are in `preprocessing.binning`: `bin_frames()`,
 
 ## What is written
 
+A projection file of the [URCT HDF5 standard](./FILE_STANDARD.md):
+
 ```
-/entry/instrument/detector/data           projections
+/entry/instrument/detector/data           projections (one frame per chunk, not compressed)
 /entry/instrument/detector/flat_fields    flat fields (if the source has them)
 /entry/instrument/detector/dark_fields    dark fields (if the source has them)
-/entry/instrument/sample/rotation_angle   degrees (if the source has them)
-/entry/instrument/detector/pixel_size     micrometres, multiplied by the bin factor (if known)
+/entry/sample/rotation_angle              degrees (if the source has them)
+/entry/geometry/geometry_type, voxel_size, pixel_size, ...   every known field the source has
+                                          (pixel sizes multiplied by the bin factor)
+/entry/provenance                         attributes: source_plugin, source_path, source_format,
+                                          bin_y, bin_x, bin_method, original_image_shape, source_metadata (JSON)
+/entry/software                           attributes: the software version that wrote the file
 ```
 
-Root attributes: `beamline`, `source_plugin`, `source_path`,
-`source_format`, `bin_y`, `bin_x`, `bin_method`, `original_image_shape`,
-`source_metadata` (JSON).
+Root attributes: `urct_standard`, `urct_version`, `urct_file_type`, `urct_uuid`, and
+`urct_complete` (false when a mandatory field such as the angles is still unknown;
+the import then asks for it). A field the source does not know is left out, never invented.
+`compression="none"` is the default; `"gzip"` and `"lzf"` are still available.
+Check a file with `core.urct_format.check_file(path)`.
 
 Only parallel-beam projects can be converted. Images whose size is not
 divisible by the bin factor are cropped symmetrically.
 
-The layout is the one read by the `generic_parallel_synchrotron_hdf5`
-plugin. A generic HDF5 standard is on the [backlog](./BACKLOG.md).
+The layout is read by the `urct_hdf5` plugin. Files converted before version 0.2.0
+(interim layout) are still read by `generic_parallel_synchrotron_hdf5`.
 
 ## ILL converter script
 

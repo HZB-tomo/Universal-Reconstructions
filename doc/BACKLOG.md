@@ -2,23 +2,20 @@
 
 ## Generic HDF5 standard
 
-One HDF5 layout for projection files and for exported volumes. Not
-designed yet.
+One HDF5 layout for projection files and for exported volumes. Draft in
+[FILE_STANDARD.md](./FILE_STANDARD.md); decisions settled, not implemented.
 
-Current state:
+Done in 0.2.0: the `urct_hdf5` reader plugin, the converter writing it, software
+versioning (`core/version.py`, `CHANGELOG.md`, `tomo --version`; git tags are
+still to be made by hand).
 
-- Converted projections (`data_import/converter.py`) use the layout read
-  by the `generic_parallel_synchrotron_hdf5` plugin.
-- Exported volumes are one dataset (`/volume`) with a
-  `reconstruction_settings` attribute.
+Also done in 0.2.0: the volume file (writer, reader, GUI viewer, pipeline record).
 
-To define:
+Work items left, in order:
 
-- Required and optional datasets and attributes.
-- Units, angle convention, geometry types including cone-beam.
-- Metadata fields and where they are stored.
-- Format version.
-- One layout covering both projection files and volume files.
+- Open a volume file in the GUI as an item of its own, with its reconstruction record shown.
+- Change the phantom generators in `tests/fixtures` to write the new standard.
+- Make the git tag `v0.2.0`.
 
 ## TIFF import
 

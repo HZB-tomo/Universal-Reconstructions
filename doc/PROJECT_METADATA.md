@@ -50,7 +50,7 @@ derive-then-ask.
 | `angle_span` | Geometry / scan | `mandatory_soft` | Derive (max − min of `angles`, if present) → else Ask | — | degrees | |
 | `rotation_direction` | Geometry / scan | `optional` | Default | `ccw` | categorical: `cw` / `ccw` | Wrong default only flips orientation, never invalidates the reconstruction. |
 | `voxel_size` | Pixel / detector | `mandatory_soft` | Default | `1` | µm | |
-| `detector_pixel_size` | Pixel / detector | `mandatory_soft` | Derive (from `voxel_size`) → else Default | `1` | µm | Distinct from `voxel_size` only in cone-beam (magnification). `voxel_size` always resolves first, so this derives from it in practice. |
+| `detector_pixel_size` | Pixel / detector | `mandatory_soft` | Derive (from `voxel_size`) → else Default | `1` | µm | Distinct from `voxel_size` only in cone-beam (magnification). `voxel_size` always resolves first, so this derives from it in practice. For a cone-beam reconstruction the detector pitch used is `voxel_size * SDD / SOD` (`orchestration/geometry.py`), unless this field was given by the file or the user. |
 | `source_to_detector_distance` | Cone-beam geometry | `mandatory_soft`, conditional on `geometry_type == "cone"` | Ask | — | mm | Unused for parallel-beam projects. |
 | `source_to_object_distance` | Cone-beam geometry | `mandatory_soft`, conditional on `geometry_type == "cone"` | Ask | — | mm | Unused for parallel-beam projects. |
 | `center_of_rotation` | Alignment | `computed` | Calculate (tool proposes) + user confirms | `0` | pixels (deviation from image center, sub-pixel float) | Never blocks import or reconstruction; reconstruction proceeds on the current value whether or not it's been confirmed. |
@@ -59,4 +59,5 @@ derive-then-ask.
 | `instrument_name` | Provenance | `optional` | — | — | text | |
 | `acquisition_datetime` | Provenance | `optional` | — | — | timestamp | |
 | `sample_name` | Provenance | `optional` | Ask | — | text | Useful for naming output volumes later. |
-| `energy` | Provenance | `optional` | — (no prompt) | — | keV | Purely a pass-through if the vendor happens to provide it — never asked for, never blocks or affects calculations. |
+| `energy` | Provenance | `optional` | — (no prompt) | — | keV | A pass-through if the vendor provides it (or give it as a completion answer). Never blocks anything; phase retrieval uses it as the X-ray energy. |
+| `propagation_distance` | Provenance | `optional` | Ask | — | mm | Sample-to-detector distance. Used only by phase retrieval (with `energy` and a pixel size); never asked for otherwise. |

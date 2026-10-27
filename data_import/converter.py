@@ -9,18 +9,17 @@ DataImporter.import_project(); pass `plugin=` to choose one. Frames are
 read lazily and written in batches, so the project never has to fit in
 RAM.
 
-Output layout (interim; the generic HDF5 standard is still to be
-designed, see doc/BACKLOG.md). Written paths are the ones the
-`generic_parallel_synchrotron_hdf5` plugin reads:
+Output: a projection file of the URCT HDF5 standard (doc/FILE_STANDARD.md,
+paths in core/urct_format.py), read back by the `urct_hdf5` plugin:
 
-    /entry/instrument/detector/data           projections
-    /entry/instrument/detector/flat_fields    flat fields (if the source has them)
-    /entry/instrument/detector/dark_fields    dark fields (if the source has them)
-    /entry/instrument/sample/rotation_angle   angles, degrees (if the source has them)
-    /entry/instrument/detector/pixel_size     um, multiplied by the bin factor (if known)
+    /entry/instrument/detector/data          projections (chunks of one frame, not compressed)
+    /entry/instrument/detector/flat_fields   flat fields (if the source has them)
+    /entry/instrument/detector/dark_fields   dark fields (if the source has them)
+    /entry/geometry, /entry/sample, ...      every known metadata field the source has,
+                                             pixel sizes multiplied by the bin factor
+    /entry/provenance, /entry/software       where it came from, binning, software version
 
-Root attributes record the source plugin and path, the binning and the
-source metadata.
+A field the source does not know is left out, not invented.
 """
 from __future__ import annotations
 
@@ -33,16 +32,11 @@ import numpy as np
 from core.data_interface import DataInterface
 from data_import.importer import DataImporter
 from data_import.plugin import ImportPlugin
-from data_import.vendors.generic_parallel_synchrotron import (
-    _ANGLES as ANGLES,
-    _DARK_FIELDS as DARK_FIELDS,
-    _FLAT_FIELDS as FLAT_FIELDS,
-    _PIXEL_SIZE as PIXEL_SIZE,
-    _PROJECTIONS as PROJECTIONS,
-)
+from core import urct_format as fmt
 from preprocessing.binning import bin_frames, binned_shape, cast_to_dtype, resolve_dtype
 
-BEAMLINE_TAG = "generic_parallel_synchrotron"
+_PIXEL_SIZED = ("voxel_size", "detector_pixel_size")   # scaled by the horizontal bin factor
+_NOT_COPIED = ("angles", "geometry_type", "center_of_rotation", "tilt_angle")  # handled separately / computed later
 
 # progress(frames_done, frames_total, label)
 ProgressFn = Callable[[int, int, str], None]
@@ -83,7 +77,7 @@ def convert_to_hdf5(
     bin_x: int = 1,
     method: Literal["mean", "sum"] = "mean",
     dtype: str = "auto",
-    compression: Literal["gzip", "lzf", "none"] = "gzip",
+    compression: Literal["gzip", "lzf", "none"] = "none",
     compression_level: int = 4,
     batch: int = 16,
     overwrite: bool = False,
@@ -137,8 +131,24 @@ def convert_to_hdf5(
             if len(angles) != n_proj:
                 raise ConversionError(f"source has {len(angles)} angles for {n_proj} projections")
 
-        voxel_size = metadata.get("voxel_size")
-        pixel_size = float(voxel_size) * bin_x if voxel_size is not None else None
+        # Every known field the source has, with where its value came from. Unknown stays absent.
+        fields = {}
+        for key in fmt.FIELD_PATHS:
+            if key in _NOT_COPIED:
+                continue
+            spec = metadata.get_field(key)
+            if spec is None or spec.is_missing:
+                continue
+            value = spec.value
+            if key in _PIXEL_SIZED:
+                value = float(value) * bin_x
+            fields[key] = (value, spec.source or "file")
+        fields["geometry_type"] = ("parallel", "file" if geometry == "parallel" else "default")
+        if angles is not None:
+            fields["angles"] = (angles, "file")
+        if "detector_pixel_size" not in fields and "voxel_size" in fields:
+            fields["detector_pixel_size"] = (fields["voxel_size"][0], "derived")   # parallel beam: the same size
+        complete = fmt.is_complete({key: value for key, (value, _source) in fields.items()})
 
         out_dtype = resolve_dtype(projections.get(0).dtype, method, dtype)
         chunks = (1, hb, wb)
@@ -159,25 +169,30 @@ def convert_to_hdf5(
 
         try:
             with h5py.File(output, "w") as f:
-                f.attrs["beamline"] = BEAMLINE_TAG
-                f.attrs["source_plugin"] = project.vendor_plugin_name or ""
-                f.attrs["source_path"] = str(Path(source).resolve())
-                f.attrs["source_format"] = format
-                f.attrs["bin_y"], f.attrs["bin_x"] = bin_y, bin_x
-                f.attrs["bin_method"] = method
-                f.attrs["original_image_shape"] = (height, width)
-                f.attrs["source_metadata"] = json.dumps(_json_safe(project.export_metadata()))
+                fmt.write_header(f, fmt.FILE_PROJECTIONS, complete=complete)
+                provenance = f.require_group(fmt.PROVENANCE).attrs
+                provenance["source_plugin"] = project.vendor_plugin_name or ""
+                provenance["source_path"] = str(Path(source).resolve())
+                provenance["source_format"] = format
+                provenance["bin_y"], provenance["bin_x"] = bin_y, bin_x
+                provenance["bin_method"] = method
+                provenance["original_image_shape"] = (height, width)
+                provenance["source_metadata"] = json.dumps(_json_safe(project.export_metadata()))
+                fmt.write_software(f, "converted_by")
 
-                ds = f.create_dataset(PROJECTIONS, shape=(n_proj, hb, wb), dtype=out_dtype, chunks=chunks, **comp)
+                ds = f.create_dataset(fmt.PROJECTIONS, shape=(n_proj, hb, wb), dtype=out_dtype, chunks=chunks, **comp)
                 for start in range(0, n_proj, batch):
                     check_cancel()
                     stop = min(start + batch, n_proj)
                     ds[start:stop] = bin_cast(projections.get(slice(start, stop)))
+                    if start == 0:
+                        ds.attrs["axes"] = "angle,row,column"
+                        ds.attrs["image_type"] = "raw"
                     done = stop
                     if progress:
                         progress(done, total, "projections")
 
-                for name, stack, path in (("flats", flats, FLAT_FIELDS), ("darks", darks, DARK_FIELDS)):
+                for name, stack, path in (("flats", flats, fmt.FLAT_FIELDS), ("darks", darks, fmt.DARK_FIELDS)):
                     if stack is None:
                         continue
                     check_cancel()
@@ -186,12 +201,8 @@ def convert_to_hdf5(
                     if progress:
                         progress(done, total, name)
 
-                if angles is not None:
-                    f.create_dataset(ANGLES, data=angles)
-                    f[ANGLES].attrs["units"] = "degrees"
-                if pixel_size is not None:
-                    f.create_dataset(PIXEL_SIZE, data=pixel_size)
-                    f[PIXEL_SIZE].attrs["units"] = "um"
+                for key, (value, field_source) in fields.items():
+                    fmt.write_field(f, key, value, field_source)
         except BaseException:
             output.unlink(missing_ok=True)  # never leave a half-written file that looks valid
             raise

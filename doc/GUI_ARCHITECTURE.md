@@ -16,6 +16,7 @@ gui/
   project_panel.py       ProjectPanel
   adjustment_panel.py     AdjustmentPanel and its four tabs
   viewer.py              ImageViewer
+  metadata_toolbox.py    MetadataToolbox (dock widget); metadata_info.py is its Qt-free model
   session.py             ProjectSession, unique_project_id()
   workers.py             Worker, run_in_background()
 ```
@@ -27,6 +28,36 @@ Adjustment, right), movable/floatable but not closable; `ImageViewer`
 is the central widget. Menu bar (`File`, `Tools`) and status bar.
 Tools > Convert TIFF project to HDF5... opens `ConvertDialog`
 (`gui/convert_dialog.py`); see [`CONVERTER.md`](./CONVERTER.md).
+Tools > Metadata toolbox shows or hides a third dock (see below), which, unlike the
+other two, can be closed.
+
+## Metadata toolbox
+
+A dock (hidden at start, left side) that lists every metadata field of one project
+(`gui/metadata_toolbox.py`; the rows come from `gui/metadata_info.py`, which has no Qt).
+It follows the project selected in the project panel and the one opened in the viewer,
+and updates when the project changes (import finished, completion answers entered).
+
+Rows are grouped by tier (see [`PROJECT_METADATA.md`](./PROJECT_METADATA.md)): must be in
+the file, needed (can be filled in), optional, calculated by the software, and other (the
+plugin's own fields and `extra.*`). Each row shows the field, its value (an array as its shape and
+range), a status and the unit:
+
+| Status | Meaning |
+|---|---|
+| read from file | the plugin read it |
+| set by you | a completion answer you gave |
+| default | a fixed fallback was applied (check it) |
+| derived | computed from other fields |
+| calculated | the software calculated it (centre, tilt) |
+| set in settings | centre or tilt typed in the settings, not yet calculated |
+| MISSING (red) | not in the file and not filled in; the tooltip says how it can be resolved |
+| not yet calculated | a calculated field, before calibration has run |
+| not needed | only for another geometry (the cone-beam distances in a parallel project) |
+
+The line above the list counts them. When completion could not fill in a required field,
+the same line carries its message, so the toolbox also shows why a project cannot continue.
+"Only what is missing or not from the file" hides the fields that were simply read.
 
 Dock layout is not persisted between launches; it resets to the
 default each time.
@@ -255,8 +286,12 @@ the user.
 otherwise it's editable, writing into
 `completion_answers["voxel_size"]`.
 
+Choosing **cone** as the geometry type shows the two distances (source-detector, source-object, mm; stored as
+completion answers) and restricts the algorithm list to cone-beam backends (see [`CONE_BEAM.md`](./CONE_BEAM.md)); switching
+back to parallel restores the usual list. "Reconstruct (slice)" is not available for cone-beam data.
+
 The reconstruction-algorithm combo is built from the backend registry
-(`reconstruction.list_backends()`): every registered backend whose
+(`reconstruction.list_backends(geometry=...)`): every registered backend that supports the project's geometry and whose
 required packages are installed, in a fixed order (`algotom_fbp`,
 `gridrec`, `algotom_bpf`, ...) with any others alphabetically after.
 `algotom_gridrec` (needs conda-only tomopy) and the ASTRA backends
@@ -337,6 +372,34 @@ enabled only while checked. Left unedited, both stay `None` on
 -- the spin boxes only show those defaults, the same "display a
 fallback without writing it back" convention `tilt_spin` uses for
 `tilt_deg=None`.
+
+**Phase retrieval** (a group at the bottom of the tab; see
+[`PHASE_RETRIEVAL.md`](./PHASE_RETRIEVAL.md)): a checkbox, the method, and four
+values -- delta/beta, propagation distance, energy, pixel size. Each shows the
+value the project already provides (the file's energy and distance, or one
+typed in as a completion answer; the pixel size from the file or Basic settings,
+never a silent default), with a small note on where it came from ("from the
+file", "typed in", "set here"). Typing a value stores it in
+`ProjectConfig.phase_*` and overrides the project's; setting it back to 0
+("not set") returns to the project's value. delta/beta has no default. Under the
+controls, one line says what is still needed (in red) or, once complete, the
+smoothing length in um and pixels and the halo in rows
+(`gui/phase_info.py`, Qt-free). Changing any value re-previews the slice when
+"Auto-update preview" is on and the settings are complete; the settings take part
+in the preview cache key, so each delta/beta already tried is remembered. All
+phase fields can be copied between projects (own "Phase retrieval" category in
+Copy settings). If the settings are incomplete when a reconstruction starts,
+the run stops with an error naming what is missing.
+
+**Beam hardening** (the group below phase retrieval; see
+[`BEAM_HARDENING.md`](./BEAM_HARDENING.md)): a checkbox and the coefficients
+`c1`, `c2`, `c3` of `p_corrected = c1 p + c2 p^2 + c3 p^3`. Ticking starts from
+(1, 0, 0), which changes nothing. The line under the fields shows what the values
+do to attenuations of 1, 2 and 3, or, in red, why they are unusable (the
+polynomial must be increasing at least up to attenuation 3); an unusable
+set never triggers a preview. With "Auto-update preview" on, each edit
+re-previews the slice. Both settings can be copied between projects (the "Beam
+hardening" category in Copy settings).
 
 ### Save settings
 
@@ -499,8 +562,6 @@ frame, cached so hovering doesn't trigger a disk read in lazy mode).
 - Dock layout persistence.
 - Import-from-config (loading a batch `.ini` directly into the project
   panel).
-- A UI for `source_to_detector_distance`/`source_to_object_distance`
-  (required, `ask`-only, only when `geometry_type == "cone"`).
 - No cross-session guard on background operations: if the open project
   changes while a reconstruct/find-COR/find-tilt worker for the
   previous one is still in flight, its result still updates the

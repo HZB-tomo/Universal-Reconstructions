@@ -114,6 +114,9 @@ def _cmd_convert(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tomo", description="Run the tomo_project reconstruction pipeline.")
+    from core.version import __version__
+
+    parser.add_argument("--version", action="version", version=f"tomo_project {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     p_run = subparsers.add_parser("run", help="Run one project through the full pipeline.")

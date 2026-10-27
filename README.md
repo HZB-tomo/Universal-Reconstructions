@@ -131,6 +131,7 @@ tomo-gui                      # the desktop GUI
 | `preprocessing` | algotom | zinger/ring removal, the `algotom_fbp`/`algotom_bpf`/`algotom_dfi` reconstruction backends, the `algotom` center-of-rotation search |
 | `gridrec` | urct_gridrec (+ numba) | the `gridrec` reconstruction backend (fast; pure Python) |
 | `gridrec_gpu` | CuPy (CUDA 12) | gridrec on an NVIDIA GPU (experimental, see below) |
+| `cone` | itk-rtk (large: brings ITK) | cone-beam FDK reconstruction, the `rtk_fdk` backend (CPU; see [`doc/CONE_BEAM.md`](./doc/CONE_BEAM.md)) |
 | `reconstruction_extra` | astra-toolbox | the ASTRA backends `algotom_bp/sirt/sart/art/cgls` |
 | `all` | `gui` + `preprocessing` + `gridrec` | the usual full install |
 
@@ -162,6 +163,9 @@ of the algorithm list, and the command line says which package to install.
 - [`doc/CLI.md`](./doc/CLI.md) — the `tomo` command line: every subcommand, exit codes, example output
 - [`doc/ORCHESTRATION.md`](./doc/ORCHESTRATION.md) — running one or many projects unattended, from a config file
 - [`doc/ARCHITECTURE.md`](./doc/ARCHITECTURE.md) — how the codebase is structured
+- [`doc/CONE_BEAM.md`](./doc/CONE_BEAM.md) — cone-beam (FDK) reconstruction: the geometry, what to provide, the limits
+- [`doc/BEAM_HARDENING.md`](./doc/BEAM_HARDENING.md) — beam hardening (cupping) correction: the physics, the settings
+- [`doc/PHASE_RETRIEVAL.md`](./doc/PHASE_RETRIEVAL.md) — phase-contrast retrieval (Paganin): the physics, the settings, the halo
 - [`doc/WRITING_A_PLUGIN.md`](./doc/WRITING_A_PLUGIN.md) — adding support for a new instrument
 - [`doc/PROJECT_METADATA.md`](./doc/PROJECT_METADATA.md) — every metadata field's tier, strategy, and unit
 - [`doc/CALIBRATION.md`](./doc/CALIBRATION.md) — center-of-rotation and tilt finding

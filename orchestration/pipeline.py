@@ -25,7 +25,7 @@ from core.project import ProjectObject
 from data_import.errors import AmbiguousVendorMatchError, NoVendorMatchError, ProjectImportError
 from data_import.importer import DataImporter
 from data_import.plugin import get_plugin
-from preprocessing import build_reference, normalize_rows, process_volume, remove_ring_artifacts, remove_zinger
+from preprocessing import build_reference
 from reconstruction import (
     Geometry, resolve_device, StreamingVolumeWriter, reconstruct, reconstruct_rotated, save_volume,
     supports_exact_rotation, to_uint16,
@@ -33,7 +33,10 @@ from reconstruction import (
 
 from orchestration import ram_check
 from orchestration.config import PipelineStageError, ProjectConfig
+from orchestration.geometry import geometry_from_project
+from orchestration.preprocess import preprocess_rows, resolve_beam_hardening, resolve_phase
 from orchestration.progress import ProgressEvent
+from orchestration.volume_record import RunTimer, record_settings
 
 
 @dataclass
@@ -115,19 +118,13 @@ class PipelineRun:
             already_normalized=self.config.projections_normalized,
         )
         rows = self.config.rows if self.config.rows is not None else slice(None)
-        self.normalized = normalize_rows(self.project, rows, self.reference)
-
-        if self.config.zinger_removal:
-            self.normalized = process_volume(
-                self.normalized, remove_zinger,
-                self.config.zinger_threshold if self.config.zinger_threshold is not None else 0.08,
-                size=self.config.zinger_size if self.config.zinger_size is not None else 2,
-            )
-        if self.config.ring_correction:
-            self.normalized = process_volume(
-                self.normalized, remove_ring_artifacts,
-                method=self.config.ring_method, **self.config.ring_options,
-            )
+        if resolve_beam_hardening(self.config) is not None:
+            self._log(f"beam hardening correction, coefficients {list(self.config.bh_coefficients)}")
+        phase = resolve_phase(self.project, self.config)
+        if phase is not None:
+            self._report("Retrieving phase")
+            self._log(f"phase retrieval ({phase.method.name}), halo {phase.halo} rows")
+        self.normalized = preprocess_rows(self.project, self.config, self.reference, rows, phase)
 
         self._log(f"preprocessed {self.normalized.shape[1]} rows")
         return self.normalized
@@ -179,34 +176,31 @@ class PipelineRun:
         # comment), so this is the single place they're allowed to come
         # from, not a second, possibly-disagreeing source.
         di = DataInterface(self.project)
-        geometry = Geometry(
-            geometry_type=di.get_metadata("geometry_type"),
-            source_to_detector_distance=di.get_metadata("source_to_detector_distance"),
-            source_to_object_distance=di.get_metadata("source_to_object_distance"),
-            detector_pixel_size=di.get_metadata("detector_pixel_size"),
-        )
+        geometry = geometry_from_project(self.project)
+        self._check_cone_beam_supported(geometry)
         angles = di.get_metadata("angles")
         device = self._device()
         n_rows = self.normalized.shape[1]
         self._report("Reconstructing", 0, n_rows, device)
+        timer = RunTimer()
 
         def reconstruct_rows(sinograms, centers):
             if self.config.rotate_deg:
                 return reconstruct_rotated(
                     sinograms, angles, centers, geometry=geometry,
                     backend=self.config.reconstruction_backend, rotate_deg=self.config.rotate_deg,
-                    device=self.config.device, **self.config.reconstruction_options,
+                    device=self.config.device, **self.config.backend_options(),
                 )
             return reconstruct(
                 sinograms, angles, centers, geometry=geometry,
                 backend=self.config.reconstruction_backend, device=self.config.device,
-                **self.config.reconstruction_options,
+                **self.config.backend_options(),
             )
 
         # Rows are independent (parallel beam), so with a progress
         # callback the stack is reconstructed a chunk of rows at a time
         # -- same result, but the caller sees slices-done advance.
-        chunk_rows = ram_check.estimate_chunk_rows(self.normalized.shape[2], n_rows, device, self.normalized.shape[0]) if self.progress is not None else n_rows
+        chunk_rows = ram_check.estimate_chunk_rows(self.normalized.shape[2], n_rows, device, self.normalized.shape[0]) if self.progress is not None and geometry.geometry_type != "cone" else n_rows
         if chunk_rows >= n_rows:
             self.volume = reconstruct_rows(self.normalized, self.centers)
         else:
@@ -225,8 +219,24 @@ class PipelineRun:
             method = "sinogram reorder" if supports_exact_rotation(angles, geometry.geometry_type) else "image-domain fallback"
             self._log(f"rotated {self.config.rotate_deg}deg via {method}")
         self.settings["backend"] = self.config.reconstruction_backend
+        self.settings.update(record_settings(self.config))
+        self.settings.update(timer.entries(self.volume.shape[0]))
         self._log(f"reconstructed volume {self.volume.shape}")
         return self.volume
+
+    def _check_cone_beam_supported(self, geometry) -> None:
+        """Cone-beam reconstruction takes the whole detector at once and one rotation center."""
+        if geometry.geometry_type != "cone":
+            return
+        if self.config.rows is not None:
+            raise PipelineStageError(
+                "reconstruct", "cone-beam reconstruction needs every detector row: leave the slice range "
+                "(config.rows) unset. Use crop to keep part of the volume.",
+            )
+        if self.config.tilt_deg:
+            raise PipelineStageError(
+                "reconstruct", "a rotation-axis tilt correction is not supported for cone-beam data (tilt must be 0)",
+            )
 
     def postprocess(self) -> np.ndarray:
         self._report("Postprocessing")
@@ -395,12 +405,16 @@ class PipelineRun:
             self.project, reducer=self.config.reference_reducer, dark_offset=self.config.dark_offset,
             already_normalized=self.config.projections_normalized,
         )
-        geometry = Geometry(
-            geometry_type=di.get_metadata("geometry_type"),
-            source_to_detector_distance=di.get_metadata("source_to_detector_distance"),
-            source_to_object_distance=di.get_metadata("source_to_object_distance"),
-            detector_pixel_size=di.get_metadata("detector_pixel_size"),
-        )
+        resolve_beam_hardening(self.config)                  # likewise: fail before anything is written
+        phase = resolve_phase(self.project, self.config)    # fails here, before any chunk is written
+        if phase is not None:
+            self._log(f"phase retrieval ({phase.method.name}), halo {phase.halo} rows per chunk edge")
+        geometry = geometry_from_project(self.project)
+        if geometry.geometry_type == "cone":
+            raise PipelineStageError(
+                "reconstruct", "streaming (chunk by chunk) does not work for cone-beam data: every output slice needs "
+                "every detector row. Turn streaming off.",
+            )
         angles = di.get_metadata("angles")
 
         self.project.metadata.set_computed("center_of_rotation", center)
@@ -427,11 +441,13 @@ class PipelineRun:
 
         template = self.config.export_path or self._default_export_path_template()
         path = self._resolve_export_path(template)
+        self.settings.update(record_settings(self.config))
         export_settings = {
             **self.project.export_metadata(),
             **self.settings,
             **self.config.export_extra_settings,
         }
+        timer = RunTimer()
         out_dtype = np.uint16 if self.config.dtype == "uint16" else np.float32
         device = self._device()
         self._report("Preparing", 0, total_rows, device)
@@ -451,18 +467,9 @@ class PipelineRun:
                     continue  # this whole chunk falls outside config.crop's z-range
 
                 self._report("Normalizing projections", rel_start, total_rows, device)
-                chunk = normalize_rows(self.project, slice(chunk_start, chunk_stop), self.reference)
-                if self.config.zinger_removal:
-                    chunk = process_volume(
-                        chunk, remove_zinger,
-                        self.config.zinger_threshold if self.config.zinger_threshold is not None else 0.08,
-                        size=self.config.zinger_size if self.config.zinger_size is not None else 2,
-                    )
-                if self.config.ring_correction:
-                    chunk = process_volume(
-                        chunk, remove_ring_artifacts,
-                        method=self.config.ring_method, **self.config.ring_options,
-                    )
+                chunk = preprocess_rows(
+                    self.project, self.config, self.reference, slice(chunk_start, chunk_stop), phase,
+                )
 
                 self._report("Reconstructing", rel_start, total_rows, device)
                 chunk_centers = center if tilt_deg == 0.0 else centers_for_rows(
@@ -472,13 +479,13 @@ class PipelineRun:
                     chunk_volume = reconstruct_rotated(
                         chunk, angles, chunk_centers, geometry=geometry,
                         backend=self.config.reconstruction_backend, rotate_deg=self.config.rotate_deg,
-                        device=self.config.device, **self.config.reconstruction_options,
+                        device=self.config.device, **self.config.backend_options(),
                     )
                 else:
                     chunk_volume = reconstruct(
                         chunk, angles, chunk_centers, geometry=geometry,
                         backend=self.config.reconstruction_backend, device=self.config.device,
-                        **self.config.reconstruction_options,
+                        **self.config.backend_options(),
                     )
 
                 if self.config.dtype == "uint16":
@@ -494,6 +501,7 @@ class PipelineRun:
                 writer.write_chunk(chunk_volume, z_offset=write_start - z0)
                 self._report("Writing", rel_stop, total_rows, device)
                 self._log(f"streamed rows {chunk_start}:{chunk_stop} ({chunk_stop - chunk_start} slices)")
+            writer.update_record(**timer.entries(out_total_rows))
         finally:
             writer.close()
 

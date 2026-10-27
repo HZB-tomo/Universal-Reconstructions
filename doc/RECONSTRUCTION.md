@@ -62,8 +62,9 @@ phantom).
 
 ## Built-in backends
 
-Ten backends, all parallel-beam only. Nine wrap `algotom`; `gridrec` is
-this project's own implementation (see below). Each backend declares the
+Eleven backends. Ten are parallel-beam: nine wrap `algotom`, and `gridrec` is
+this project's own implementation (see below). The eleventh, `rtk_fdk`, is the cone-beam one (see
+[`CONE_BEAM.md`](./CONE_BEAM.md)). Each backend declares the
 packages it needs (`ReconstructionBackend.requires`); one whose packages are
 missing stays registered but is left out of the GUI's algorithm list, and
 `reconstruction.list_backends()` returns only the usable ones.
@@ -72,6 +73,7 @@ missing stays registered but is left out of the GUI's algorithm list, and
 |---|---|---|---|
 | `algotom_fbp` | `fbp_reconstruction` | CPU/GPU | `algotom` (via the `preprocessing` extra) |
 | `gridrec` | `urct_gridrec` (own implementation) | CPU; GPU on request (experimental) | `urct_gridrec` (the `gridrec` extra) |
+| `rtk_fdk` | RTK's `FDKConeBeamReconstructionFilter` | CPU | `itk-rtk` (the `cone` extra); **cone-beam only** |
 | `algotom_gridrec` | `gridrec_reconstruction` | CPU only | `algotom` **and** `tomopy` (conda-only, no pip wheel -- see below) |
 | `algotom_bpf` | `bpf_reconstruction` | CPU/GPU | `algotom` |
 | `algotom_dfi` | `dfi_reconstruction` | CPU only | `algotom` |
@@ -218,8 +220,18 @@ Writes a reconstructed volume (or a single 2D image) to disk.
 (created if needed), named `slice_00000.tif`, `slice_00001.tif`, ...;
 this is the same folder-of-files layout `data_import`'s `TiffBackend`
 reads, so the output round-trips back through `DataImporter`.
-`format="hdf5"` writes a single dataset, at `dataset_path` (default
-`"/volume"`), inside the HDF5 file at `path`.
+`format="hdf5"` writes a **volume file of the [URCT standard](./FILE_STANDARD.md)**
+at `path`: the volume at `dataset_path` (default `/entry/volume/data`; chunked in
+64-voxel cubes so slices along z, y and x are all quick; not compressed), the
+reconstruction record (`/entry/reconstruction`: algorithm, filter, iterations,
+centre, tilt, offset angle, device, speed, clipping, crop, preprocessing, ...), the
+measurement metadata at the same paths as in a projection file, a link to the
+projection file it came from, and the software version. Files from before
+version 0.2.0 (one `/volume` dataset) are still read.
+
+Read one back with `reconstruction.volume_file.read_volume_info(path)`: shape, units,
+voxel size, the record, the measurement, and `to_physical()` to turn a stored uint16
+slice back into attenuation coefficients.
 
 `settings` is an open dict recording anything about how this volume was
 produced: reconstruction backend and options, center, tilt, whether
@@ -228,15 +240,17 @@ acquisition metadata pulled from a `ProjectObject` via its
 `export_metadata()` method (`core/project.py`) -- merge that dict with
 any manual entries yourself before passing it in, e.g.
 `settings={**project.export_metadata(), "backend": "algotom_fbp"}`.
-Written as JSON: an HDF5 attribute (`reconstruction_settings`, on the
-dataset) for `format="hdf5"`, or a `metadata.json` file alongside the
-slices for `format="tiff"`. Values must be JSON-serializable; numpy
-scalars and arrays are converted automatically. Omitted entirely if
-`settings` is `None` or empty.
+For `format="hdf5"` the entries it knows (`backend`, `filter_name`, `center`,
+`dtype_clip`, the metadata fields of `export_metadata()`, ...) are filed into the
+standard's groups, and the whole dict is also kept as JSON in the dataset's
+`reconstruction_settings` attribute, so nothing is lost; for `format="tiff"` it is a
+`metadata.json` file alongside the slices. Values must be JSON-serializable; numpy
+scalars and arrays are converted automatically. Omitted if `settings` is `None` or empty.
 
-Neither format records units on its own; carry that through `settings`
-too if this volume will outlive the session that made it. See "Units"
-above for what a volume's raw values mean.
+An HDF5 volume records its units itself (`1/cm` when `settings` holds
+`detector_pixel_size`, otherwise `1/px`) and, for uint16, `scale` and `offset`. TIFF
+stacks do not; carry that through `settings`. See "Units" above for what a volume's raw
+values mean.
 
 `StreamingVolumeWriter` is `save_volume()`'s incremental counterpart --
 see "Streaming" below.
@@ -377,6 +391,28 @@ Inputs are normalized transmission values (what `preprocessing`
 returns), not attenuation: take the -log inside the backend (the
 algotom and gridrec backends do). `center` is a scalar or one value per
 slice; `device` is a hint -- report the truth in `actual_device()`.
+
+## Filters
+
+Analytic methods (FBP, BPF, DFI, gridrec, FDK) filter the projections with a **ramp**
+(|frequency|). The ramp alone is the sharpest choice but also amplifies high-frequency
+noise, so it is usually multiplied by a smoothing **window** that fades it out toward
+the highest frequencies: less noise, slightly less fine detail.
+
+| Backend | Filters (`ReconstructionBackend.filters`) | Default |
+|---|---|---|
+| `algotom_fbp`, `algotom_bpf`, `algotom_dfi` | ramp, hann, hamming, bartlett, blackman, nuttall, parzen, triang | hann |
+| `gridrec` | ramp, hann, hamming, cosine, shepp-logan | hann |
+| `rtk_fdk` (cone) | hann, ramp, shepp-logan, cosine | hann |
+| iterative (SIRT, SART, ART, CGLS) | none (the filter step does not exist) | -- |
+
+Rough order from sharpest/noisiest to smoothest: ramp, shepp-logan, cosine, hamming,
+hann, then blackman and the others. Choose it with `ProjectConfig.reconstruction_filter`,
+`filter = hann` in the INI `[reconstruction]` section, the **Filter** box in the GUI's
+Basic settings (shown only for algorithms that have one), or `filter_name=` in a direct
+`reconstruct()` call. A name the backend does not list raises `ValueError` (algotom itself
+would silently use the plain ramp). A backend declares its own list in the `filters` class
+attribute, so a plugin backend gets the same GUI box by setting it.
 
 ## `algotom_fbp` backend
 

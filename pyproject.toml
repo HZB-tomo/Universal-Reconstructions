@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tomo_project"
-version = "0.1.0"
+dynamic = ["version"]
 description = "URCT: a modular tomographic reconstruction pipeline -- pluggable vendor import, pluggable reconstruction backends, a desktop GUI, a CLI, and a scripting API over one shared orchestration core."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -51,15 +51,27 @@ reconstruction_extra = ["astra-toolbox"]
 gridrec = ["urct_gridrec"]
 # ... and its GPU path (NVIDIA GPU + driver; experimental, CUDA 12 wheels).
 gridrec_gpu = ["urct_gridrec[gpu]"]
+# Cone-beam reconstruction (the `rtk_fdk` backend: Feldkamp-Davis-Kress on the CPU, via
+# the Reconstruction Toolkit). Large (it brings ITK) and optional.
+cone = ["itk-rtk"]
 # Everything that installs with pip alone (no ASTRA, no TomoPy, no GPU extras).
 all = ["tomo_project[gui,preprocessing,gridrec]"]
 # Only needed to run the desktop GUI (`tomo-gui` / `python -m gui`).
 # See doc/GUI_ARCHITECTURE.md.
 gui = ["PySide6", "pyqtgraph", "psutil"]
 
+[tool.pytest.ini_options]
+filterwarnings = [
+    # ITK's SWIG bindings on newer Pythons; harmless.
+    "ignore:builtin type .* has no __module__ attribute:DeprecationWarning",
+]
+
 [project.scripts]
 tomo = "orchestration.cli:main"
 tomo-gui = "gui.main:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "core.version.__version__" }
 
 [tool.setuptools]
 packages = [

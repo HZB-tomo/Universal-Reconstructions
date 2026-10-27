@@ -51,7 +51,7 @@ def _assert_matches_eager_noise_floor(eager_config: ProjectConfig, eager_volume,
     repeat_result = PipelineRun(eager_config).run_all()
     assert repeat_result.success, repeat_result.error
     with h5py.File(repeat_result.volume_path) as f:
-        eager_repeat_volume = f["/volume"][:]
+        eager_repeat_volume = f["/entry/volume/data"][:]
 
     baseline = _corr(eager_volume, eager_repeat_volume)
     cross = _corr(eager_volume, stream_volume)
@@ -82,9 +82,9 @@ def test_streaming_matches_eager_reconstruction(tmp_path):
     assert stream_result.success, stream_result.error
 
     with h5py.File(eager_result.volume_path) as f:
-        eager_volume = f["/volume"][:]
+        eager_volume = f["/entry/volume/data"][:]
     with h5py.File(stream_result.volume_path) as f:
-        stream_volume = f["/volume"][:]
+        stream_volume = f["/entry/volume/data"][:]
 
     assert eager_volume.shape == stream_volume.shape == (12, 48, 48)
     _assert_matches_eager_noise_floor(eager_config, eager_volume, stream_volume)
@@ -111,10 +111,10 @@ def test_streaming_matches_eager_with_rows_crop_and_uint16(tmp_path):
     assert stream_result.success, stream_result.error
 
     with h5py.File(eager_result.volume_path) as f:
-        eager_volume = f["/volume"][:]
-        settings = json.loads(f["/volume"].attrs["reconstruction_settings"])
+        eager_volume = f["/entry/volume/data"][:]
+        settings = json.loads(f["/entry/volume/data"].attrs["reconstruction_settings"])
     with h5py.File(stream_result.volume_path) as f:
-        stream_volume = f["/volume"][:]
+        stream_volume = f["/entry/volume/data"][:]
 
     assert eager_volume.shape == stream_volume.shape == (8, 35, 35)
     assert eager_volume.dtype == stream_volume.dtype == np.uint16
@@ -141,9 +141,9 @@ def test_streaming_matches_eager_with_nonzero_tilt(tmp_path):
     assert stream_result.success, stream_result.error
 
     with h5py.File(eager_result.volume_path) as f:
-        eager_volume = f["/volume"][:]
+        eager_volume = f["/entry/volume/data"][:]
     with h5py.File(stream_result.volume_path) as f:
-        stream_volume = f["/volume"][:]
+        stream_volume = f["/entry/volume/data"][:]
     _assert_matches_eager_noise_floor(eager_config, eager_volume, stream_volume)
 
 
@@ -209,5 +209,5 @@ def test_streaming_defaults_missing_tilt_to_zero_instead_of_erroring(tmp_path):
     result = PipelineRun(config).run_all()
     assert result.success, result.error
     with h5py.File(result.volume_path) as f:
-        settings = json.loads(f["/volume"].attrs["reconstruction_settings"])
+        settings = json.loads(f["/entry/volume/data"].attrs["reconstruction_settings"])
     assert settings["tilt_deg"] == 0.0

@@ -145,7 +145,19 @@ KNOWN_FIELDS: dict[str, FieldDefinition] = {
         tier="optional",
         strategies=(),
         unit="keV",
-        description="Pass-through only if a vendor provides it.",
+        description=(
+            "Pass-through if a vendor provides it; can also be given as a completion answer. "
+            "Used by phase retrieval (the X-ray wavelength); nothing else depends on it."
+        ),
+    ),
+    "propagation_distance": FieldDefinition(
+        tier="optional",
+        strategies=("ask",),
+        unit="mm",
+        description=(
+            "Sample-to-detector distance. Used only by phase retrieval, which needs it together "
+            "with energy and a pixel size; never asked for otherwise."
+        ),
     ),
 }
 

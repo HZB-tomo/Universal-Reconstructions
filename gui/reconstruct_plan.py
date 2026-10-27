@@ -126,8 +126,8 @@ def unique_path(path) -> str:
 
 
 def save_ram_volume(
-    volume: np.ndarray, path: str, settings: Optional[dict] = None, dataset_path: str = "/volume",
-    progress=None, project_id: str = "", chunk_slices: int = 16,
+    volume: np.ndarray, path: str, settings: Optional[dict] = None, dataset_path: str = "/entry/volume/data",
+    progress=None, project_id: str = "", chunk_slices: int = 64,
 ) -> str:
     """Writes an in-memory (n_slices, height, width) volume to a new
     HDF5 file, a chunk of slices at a time so `progress` (ProgressEvent

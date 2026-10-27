@@ -27,7 +27,9 @@ import numpy as np
 
 from core.data_interface import DataInterface
 from orchestration import ProjectConfig
-from preprocessing import build_reference, normalize_rows, process_volume, remove_ring_artifacts, remove_zinger
+from orchestration.geometry import geometry_from_project
+from orchestration.preprocess import preprocess_rows
+from preprocessing import build_reference
 from reconstruction import Geometry, reconstruct, reconstruct_rotated
 
 DEFAULT_MAX_BYTES = 512 * 1024 ** 2
@@ -44,6 +46,9 @@ def preprocessing_key(config: ProjectConfig) -> tuple:
         config.reference_reducer, config.dark_offset, config.projections_normalized,
         config.zinger_removal, config.zinger_threshold, config.zinger_size,
         config.ring_correction, config.ring_method, _dict_key(config.ring_options),
+        config.phase_retrieval, config.phase_method, config.phase_delta_beta, config.phase_distance_mm,
+        config.phase_energy_kev, config.phase_pixel_um, _dict_key(config.phase_options),
+        config.beam_hardening, config.bh_coefficients, _dict_key(config.bh_options),
     )
 
 
@@ -51,7 +56,7 @@ def reconstruction_key(config: ProjectConfig) -> tuple:
     """Settings, other than the row and the center, that change the picture."""
     return (
         preprocessing_key(config), config.reconstruction_backend, config.device,
-        _dict_key(config.reconstruction_options), config.rotate_deg or 0.0, _dict_key(config.completion_answers),
+        _dict_key(config.backend_options()), config.rotate_deg or 0.0, _dict_key(config.completion_answers),
     )
 
 
@@ -118,17 +123,7 @@ class PreviewEngine:
                     already_normalized=config.projections_normalized,
                 )
                 self._references[ref_key] = reference
-            normalized = normalize_rows(project, slice(row, row + 1), reference)
-            if config.zinger_removal:
-                normalized = process_volume(
-                    normalized, remove_zinger,
-                    config.zinger_threshold if config.zinger_threshold is not None else 0.08,
-                    size=config.zinger_size if config.zinger_size is not None else 2,
-                )
-            if config.ring_correction:
-                normalized = process_volume(
-                    normalized, remove_ring_artifacts, method=config.ring_method, **config.ring_options,
-                )
+            normalized = preprocess_rows(project, config, reference, slice(row, row + 1))
             self._normalized[key] = normalized
             while len(self._normalized) > _MAX_NORMALIZED_ROWS:
                 self._normalized.popitem(last=False)
@@ -143,22 +138,22 @@ class PreviewEngine:
             return hit
         normalized = self._normalized_row(project, config, row)
         di = DataInterface(project)
-        geometry = Geometry(
-            geometry_type=di.get_metadata("geometry_type"),
-            source_to_detector_distance=di.get_metadata("source_to_detector_distance"),
-            source_to_object_distance=di.get_metadata("source_to_object_distance"),
-            detector_pixel_size=di.get_metadata("detector_pixel_size"),
-        )
+        geometry = geometry_from_project(project)
+        if geometry.geometry_type == "cone":
+            raise ValueError(
+                "single-slice previews are not available for cone-beam data (every slice needs every detector row): "
+                "use 'Reconstruct all slices'"
+            )
         angles = di.get_metadata("angles")
         if config.rotate_deg:
             volume = reconstruct_rotated(
                 normalized, angles, float(center), geometry=geometry, backend=config.reconstruction_backend,
-                rotate_deg=config.rotate_deg, device=config.device, **config.reconstruction_options,
+                rotate_deg=config.rotate_deg, device=config.device, **config.backend_options(),
             )
         else:
             volume = reconstruct(
                 normalized, angles, float(center), geometry=geometry, backend=config.reconstruction_backend,
-                device=config.device, **config.reconstruction_options,
+                device=config.device, **config.backend_options(),
             )
         image = np.array(volume[0], dtype=np.float32)
         with self._lock:

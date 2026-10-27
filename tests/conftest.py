@@ -23,7 +23,7 @@ from data_import.plugin import clear_registry
 # reload note below. Any NEW vendor module must be added to this import
 # AND to the reload() calls below, or it will silently stop being
 # registered after the first test that runs.
-from data_import.vendors import generic, synthetic, hypothetical_synchrotron, generic_parallel_synchrotron, bamline, ill_neutrons, desy, rx_soln
+from data_import.vendors import generic, synthetic, hypothetical_synchrotron, generic_parallel_synchrotron, urct_hdf5, bamline, ill_neutrons, desy, rx_soln
 from tests.fixtures.generate_synthetic import generate
 
 
@@ -49,6 +49,7 @@ def _fresh_registry():
     importlib.reload(synthetic)
     importlib.reload(hypothetical_synchrotron)
     importlib.reload(generic_parallel_synchrotron)
+    importlib.reload(urct_hdf5)
     importlib.reload(bamline)
     importlib.reload(ill_neutrons)
     yield

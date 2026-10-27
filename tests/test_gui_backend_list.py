@@ -21,7 +21,9 @@ def test_algorithm_combo_lists_exactly_the_usable_backends_in_order(app):
 
     tab = BasicSettingsTab()
     items = [tab.backend_combo.itemText(i) for i in range(tab.backend_combo.count())]
-    assert items == list_backends()
+    assert items == list_backends(available_only=False)
+    enabled = [tab.backend_combo.itemText(i) for i in range(tab.backend_combo.count()) if tab.backend_combo.model().item(i).isEnabled()]
+    assert enabled == list_backends()
     assert items[0] == "algotom_fbp"                       # the default stays first
 
 
@@ -40,3 +42,20 @@ def test_a_backend_registered_later_appears_in_new_panels(app, monkeypatch):
     monkeypatch.setattr(backend_module, "_REGISTRY", {**backend_module._REGISTRY, "custom_for_gui_test": Custom()})
     tab = BasicSettingsTab()
     assert "custom_for_gui_test" in [tab.backend_combo.itemText(i) for i in range(tab.backend_combo.count())]
+
+
+def test_backends_with_missing_packages_are_greyed_out_with_a_reason(app):
+    from gui.adjustment_panel import BasicSettingsTab
+    from reconstruction import get_backend
+
+    tab = BasicSettingsTab()
+    combo = tab.backend_combo
+    for i in range(combo.count()):
+        name = combo.itemText(i)
+        reason = get_backend(name).unavailable_reason()
+        item = combo.model().item(i)
+        assert item.isEnabled() == (not reason)
+        if reason:
+            assert reason in item.toolTip()
+    if "astra" in get_backend("algotom_sirt").missing_requirements():
+        assert "conda install" in get_backend("algotom_sirt").unavailable_reason()

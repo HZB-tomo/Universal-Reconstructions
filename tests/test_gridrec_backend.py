@@ -131,7 +131,7 @@ def test_pipeline_runs_with_the_gridrec_backend_eager_and_streaming(tmp_path):
         result = PipelineRun(config).run_all()
         assert result.success, result.error
         with h5py.File(result.volume_path, "r") as f:
-            return f["/volume"][:]
+            return f["/entry/volume/data"][:]
 
     eager = run("gridrec", "eager.h5")
     streamed = run("gridrec", "stream.h5", stream=True, stream_chunk_rows=3)

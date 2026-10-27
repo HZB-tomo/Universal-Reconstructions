@@ -132,8 +132,8 @@ def test_gui_style_streaming_reuses_an_already_imported_project(tmp_path):
     written = streamer.stream()
 
     with h5py.File(written, "r") as f:
-        assert f["/volume"].shape == (8, 32, 32)
-        assert np.isfinite(f["/volume"][:]).all()
+        assert f["/entry/volume/data"].shape == (8, 32, 32)
+        assert np.isfinite(f["/entry/volume/data"][:]).all()
 
 
 def test_streaming_reports_progress_per_chunk_with_device(tmp_path):
@@ -196,7 +196,7 @@ def test_eager_run_with_progress_reports_slices_and_matches_the_unchunked_result
         r = PipelineRun(config, progress=progress)
         assert r.run_all().success
         with h5py.File(tmp_path / name, "r") as f:
-            return f["/volume"][:]
+            return f["/entry/volume/data"][:]
 
     events = []
     chunked = run(events.append, "a.h5")
@@ -224,8 +224,8 @@ def test_save_ram_volume_writes_data_settings_and_reports_progress(tmp_path):
         volume, str(tmp_path / "v.h5"), {"center": np.float64(3.5)}, progress=events.append, project_id="p", chunk_slices=2,
     )
     with h5py.File(path, "r") as f:
-        np.testing.assert_array_equal(f["/volume"][:], volume)
-        assert '"center": 3.5' in f["/volume"].attrs["reconstruction_settings"]
+        np.testing.assert_array_equal(f["/entry/volume/data"][:], volume)
+        assert '"center": 3.5' in f["/entry/volume/data"].attrs["reconstruction_settings"]
     assert [e.done for e in events] == [0, 2, 4, 5] and all(e.total == 5 and e.stage == "Saving" for e in events)
 
     again = reconstruct_plan.save_ram_volume(volume, str(tmp_path / "v.h5"))
@@ -279,7 +279,7 @@ def test_streaming_a_selected_slice_range_writes_only_those_slices(tmp_path):
     streamer = PipelineRun(config)
     streamer.project = run.project
     with h5py.File(streamer.stream(), "r") as f:
-        assert f["/volume"].shape == (4, 32, 32) and n == 4 and f["/volume"].dtype == np.float32
+        assert f["/entry/volume/data"].shape == (4, 32, 32) and n == 4 and f["/entry/volume/data"].dtype == np.float32
 
     uint_config, note = streaming_config(
         ProjectConfig(path=str(source), format="hdf5", center=16.0, tilt_deg=0.0, rows=rows, dtype="uint16",
@@ -287,7 +287,7 @@ def test_streaming_a_selected_slice_range_writes_only_those_slices(tmp_path):
     streamer = PipelineRun(uint_config)
     streamer.project = run.project
     with h5py.File(streamer.stream(), "r") as f:
-        assert f["/volume"].shape == (4, 32, 32) and f["/volume"].dtype == np.uint16 and note == ""
+        assert f["/entry/volume/data"].shape == (4, 32, 32) and f["/entry/volume/data"].dtype == np.uint16 and note == ""
 
 
 # -- speed / time remaining -------------------------------------------------------

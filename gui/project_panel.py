@@ -98,6 +98,8 @@ class ProjectPanel(QWidget):
     save_requested = Signal(list)  # list[ProjectSession] whose in-memory reconstruction should be saved, see MainWindow._save_sessions()
     import_requested = Signal(str)  # "disk" or "ram": the empty area was double-clicked / right-click > Import
     reconstruction_opened = Signal(object)  # ProjectSession whose "Reconstructed" row was double-clicked
+    current_session_changed = Signal(object)  # the one selected ProjectSession, or None (for the metadata toolbox)
+    session_refreshed = Signal(object)  # ProjectSession whose rows were just refreshed
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -110,6 +112,7 @@ class ProjectPanel(QWidget):
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.itemChanged.connect(self._on_item_changed)
+        self.tree.itemSelectionChanged.connect(self._on_selection_changed)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.tree.customContextMenuRequested.connect(self._on_context_menu_requested)
         self.tree.viewport().installEventFilter(self)  # double-click on empty space -> import
@@ -180,12 +183,17 @@ class ProjectPanel(QWidget):
             child.setText(1, value)
             child.setToolTip(1, value)
         self._apply_status_color(session, item)
+        self.session_refreshed.emit(session)
 
     def _apply_status_color(self, session: ProjectSession, item: QTreeWidgetItem) -> None:
         state, _ = _status_of(session)
         color = _STATUS_COLORS[state]
         item.setForeground(0, color)
         item.child(0).setForeground(1, color)  # the Status child row itself
+
+    def _on_selection_changed(self) -> None:
+        selected = [i for i in self.tree.selectedItems() if i.parent() is None]
+        self.current_session_changed.emit(selected[0].data(0, Qt.UserRole) if len(selected) == 1 else None)
 
     def checked_sessions(self) -> list[ProjectSession]:
         return [s for s in self.sessions if s.checked]

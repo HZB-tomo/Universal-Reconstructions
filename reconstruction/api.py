@@ -69,6 +69,12 @@ def reconstruct(
             f"(supports: {sorted(backend_instance.supported_geometries)})"
         )
 
+    name = options.get("filter_name")
+    if name is not None and backend_instance.filters and name not in backend_instance.filters:
+        raise ValueError(
+            f"Backend '{backend_instance.name}' has no filter {name!r} (choose from {list(backend_instance.filters)})"
+        )
+
     sinogram = np.asarray(sinogram)
     was_single = sinogram.ndim == 2
     stack = sinogram[:, np.newaxis, :] if was_single else sinogram

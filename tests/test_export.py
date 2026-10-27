@@ -73,7 +73,7 @@ def test_save_volume_writes_an_hdf5_dataset(tmp_path):
     save_volume(volume, path, format="hdf5")
 
     with h5py.File(path, "r") as f:
-        np.testing.assert_array_equal(f["/volume"][()], volume)
+        np.testing.assert_array_equal(f["/entry/volume/data"][()], volume)
 
 
 def test_save_volume_hdf5_honors_a_custom_dataset_path(tmp_path):
@@ -111,7 +111,7 @@ def test_save_volume_writes_settings_as_an_hdf5_attribute(tmp_path):
     save_volume(volume, path, format="hdf5", settings=settings)
 
     with h5py.File(path, "r") as f:
-        stored = json.loads(f["/volume"].attrs["reconstruction_settings"])
+        stored = json.loads(f["/entry/volume/data"].attrs["reconstruction_settings"])
         assert stored == settings
 
 
@@ -122,7 +122,7 @@ def test_save_volume_omits_the_hdf5_attribute_when_no_settings_given(tmp_path):
     save_volume(volume, path, format="hdf5")
 
     with h5py.File(path, "r") as f:
-        assert "reconstruction_settings" not in f["/volume"].attrs
+        assert "reconstruction_settings" not in f["/entry/volume/data"].attrs
 
 
 def test_save_volume_writes_settings_as_a_tiff_sidecar_json_file(tmp_path):
@@ -157,5 +157,5 @@ def test_save_volume_settings_accepts_numpy_scalars_and_arrays(tmp_path):
     save_volume(volume, path, format="hdf5", settings=settings)
 
     with h5py.File(path, "r") as f:
-        stored = json.loads(f["/volume"].attrs["reconstruction_settings"])
+        stored = json.loads(f["/entry/volume/data"].attrs["reconstruction_settings"])
         assert stored == {"center": 56.0, "angles": [0.0, 1.5, 3.0]}

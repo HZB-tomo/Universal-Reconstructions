@@ -15,9 +15,11 @@ from data_import.errors import AmbiguousVendorMatchError, NoVendorMatchError
 from orchestration import BatchReport, PipelineRun, ProgressEvent, PipelineStageError, ProjectConfig, run_batch
 
 from orchestration import ram_check
+from orchestration.volume_record import record_settings
 from gui.adjustment_panel import AdjustmentPanel
 from gui.convert_dialog import ConvertDialog
 from gui.import_dialog import ImportDialog
+from gui.metadata_toolbox import MetadataToolbox
 from gui.plugin_picker_dialog import PluginPickerDialog
 from gui.project_panel import ProjectPanel
 from gui.reconstruct_plan import RememberedPaths, describe_error, save_ram_volume
@@ -66,6 +68,17 @@ class MainWindow(QMainWindow):
         right_dock.setFeatures(_not_closable)
         self.addDockWidget(Qt.RightDockWidgetArea, right_dock)
 
+        # The metadata toolbox: closable (Tools > Metadata toolbox brings it back), follows the
+        # selected project, or the opened one when the selection is several/none.
+        self.metadata_toolbox = MetadataToolbox(self)
+        self.metadata_dock = QDockWidget("Metadata", self)
+        self.metadata_dock.setWidget(self.metadata_toolbox)
+        self.metadata_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.metadata_dock)
+        self.metadata_dock.hide()
+        self.project_panel.current_session_changed.connect(self._on_current_session)
+        self.project_panel.session_refreshed.connect(self.metadata_toolbox.refresh_if)
+
         self.project_panel.import_requested.connect(self._import)
         self.project_panel.project_opened.connect(self._open_project)
         self.project_panel.reconstruct_selected_requested.connect(self._reconstruct_selected)
@@ -94,6 +107,10 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self.statusBar().showMessage("Ready")
 
+    def _on_current_session(self, session) -> None:
+        if session is not None:
+            self.metadata_toolbox.show_session(session)
+
     # -- busy indicator -----------------------------------------------------
 
     def _on_busy_changed(self, busy: bool) -> None:
@@ -117,6 +134,9 @@ class MainWindow(QMainWindow):
         # state with the main app beyond the files it's given.
         tools_menu = self.menuBar().addMenu("Tools")
         tools_menu.addAction("Convert TIFF project to HDF5...", self._open_convert_dialog)
+        self._metadata_action = self.metadata_dock.toggleViewAction()
+        self._metadata_action.setText("Metadata toolbox")
+        tools_menu.addAction(self._metadata_action)
 
     def warm_up_backends(self) -> None:
         """Compile the gridrec kernels in the background right after start-up (Numba's cache
@@ -351,7 +371,7 @@ class MainWindow(QMainWindow):
         def work() -> list:
             saved = []
             for session, path in targets:
-                settings = {**session.run.project.export_metadata(), **session.run.settings}
+                settings = {**session.run.project.export_metadata(), **session.run.settings, **record_settings(session.config)}
                 written = save_ram_volume(
                     session.ram_volume, path, settings, session.volume_dataset,
                     progress=self._progress, project_id=session.project_id,
@@ -363,7 +383,7 @@ class MainWindow(QMainWindow):
             self._pop_busy()
             for session, written in saved:
                 session.volume_path = written
-                session.volume_dataset = "/volume"
+                session.volume_dataset = "/entry/volume/data"
                 self.project_panel.refresh(session)
             self._on_progress(ProgressEvent(saved[-1][0].project_id, "Done", message=f"saved {len(saved)} reconstruction(s)"))
             message = "saved: " + "; ".join(f"{s.project_id} -> {p}" for s, p in saved)
@@ -411,6 +431,7 @@ class MainWindow(QMainWindow):
         self.viewer.restore_view(session.view_states.get("projections"))
         self._shown = (session, "projections")
         self.adjustment_panel.set_session(session)
+        self.metadata_toolbox.show_session(session)
         self._show_status(f"opened {session.project_id}")
 
     def _show_reconstruction(self, session: ProjectSession) -> None:

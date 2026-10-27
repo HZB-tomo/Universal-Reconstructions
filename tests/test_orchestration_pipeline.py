@@ -40,10 +40,10 @@ def test_run_all_succeeds_end_to_end_with_full_auto_calibration(tmp_path):
     assert result.volume_path == str(tmp_path / "out.h5")
 
     with h5py.File(result.volume_path, "r") as f:
-        assert f["/volume"].shape == (8, 64, 64)
-        assert f["/volume"].dtype == np.float32
+        assert f["/entry/volume/data"].shape == (8, 64, 64)
+        assert f["/entry/volume/data"].dtype == np.float32
         import json
-        settings = json.loads(f["/volume"].attrs["reconstruction_settings"])
+        settings = json.loads(f["/entry/volume/data"].attrs["reconstruction_settings"])
         assert settings["backend"] == "algotom_fbp"
         assert "center" in settings
         assert "tilt_deg" in settings
@@ -64,7 +64,7 @@ def test_run_all_honors_a_manually_supplied_center_and_tilt(tmp_path):
     assert result.success, result.error
     with h5py.File(result.volume_path, "r") as f:
         import json
-        settings = json.loads(f["/volume"].attrs["reconstruction_settings"])
+        settings = json.loads(f["/entry/volume/data"].attrs["reconstruction_settings"])
         assert settings["center"] == 41.5
 
 
@@ -89,7 +89,7 @@ def test_run_all_with_rotate_deg_records_settings_and_uses_sinogram_reorder(tmp_
     assert any("sinogram reorder" in line for line in result.log)
     with h5py.File(result.volume_path, "r") as f:
         import json
-        settings = json.loads(f["/volume"].attrs["reconstruction_settings"])
+        settings = json.loads(f["/entry/volume/data"].attrs["reconstruction_settings"])
         assert settings["rotate_deg"] == 17.0
 
 
@@ -110,7 +110,7 @@ def test_run_all_with_rotate_deg_on_a_limited_angle_scan_falls_back(tmp_path):
     assert result.success, result.error
     assert any("image-domain fallback" in line for line in result.log)
     with h5py.File(result.volume_path, "r") as f:
-        assert f["/volume"].shape == (4, 48, 48)
+        assert f["/entry/volume/data"].shape == (4, 48, 48)
 
 
 def test_streaming_with_rotate_deg_matches_eager_rotate_deg(tmp_path):
@@ -132,13 +132,13 @@ def test_streaming_with_rotate_deg_matches_eager_rotate_deg(tmp_path):
     eager_result = PipelineRun(eager_config).run_all()
     assert eager_result.success, eager_result.error
     with h5py.File(eager_result.volume_path) as f:
-        eager_volume = f["/volume"][:]
+        eager_volume = f["/entry/volume/data"][:]
 
     eager_repeat_config = ProjectConfig(**common, export_format="hdf5", export_path=str(tmp_path / "eager_repeat.h5"))
     eager_repeat_result = PipelineRun(eager_repeat_config).run_all()
     assert eager_repeat_result.success, eager_repeat_result.error
     with h5py.File(eager_repeat_result.volume_path) as f:
-        eager_repeat_volume = f["/volume"][:]
+        eager_repeat_volume = f["/entry/volume/data"][:]
 
     stream_config = ProjectConfig(
         **common, stream=True, export_format="hdf5", export_path=str(tmp_path / "stream.h5"),
@@ -146,7 +146,7 @@ def test_streaming_with_rotate_deg_matches_eager_rotate_deg(tmp_path):
     stream_result = PipelineRun(stream_config).run_all()
     assert stream_result.success, stream_result.error
     with h5py.File(stream_result.volume_path) as f:
-        stream_volume = f["/volume"][:]
+        stream_volume = f["/entry/volume/data"][:]
 
     baseline = _corr(eager_volume, eager_repeat_volume)
     cross = _corr(eager_volume, stream_volume)

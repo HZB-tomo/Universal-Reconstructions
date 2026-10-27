@@ -65,7 +65,7 @@ def test_dialog_converts_several_projects_with_binning(app, tmp_path):
         with h5py.File(out / name, "r") as f:
             assert f["/entry/instrument/detector/data"].shape == (6, 4, 6)
             assert f["/entry/instrument/detector/flat_fields"].shape == (1, 4, 6)
-            assert f["/entry/instrument/detector/pixel_size"][()] == pytest.approx(100.0)
+            assert f["/entry/geometry/voxel_size"][()] == pytest.approx(100.0)
     assert dialog.log.toPlainText().count(": ok") == 2
     assert dialog.convert_btn.isEnabled() and dialog.close_btn.isEnabled()
 

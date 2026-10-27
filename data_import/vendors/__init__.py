@@ -11,6 +11,7 @@ from data_import.vendors import generic  # noqa: F401
 from data_import.vendors import synthetic  # noqa: F401
 from data_import.vendors import hypothetical_synchrotron  # noqa: F401
 from data_import.vendors import generic_parallel_synchrotron  # noqa: F401
+from data_import.vendors import urct_hdf5  # noqa: F401
 from data_import.vendors import bamline  # noqa: F401
 from data_import.vendors import ill_neutrons  # noqa: F401
 from data_import.vendors import desy  # noqa: F401

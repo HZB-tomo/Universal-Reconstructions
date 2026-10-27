@@ -22,7 +22,9 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
+    QAbstractSpinBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -38,10 +40,14 @@ from PySide6.QtWidgets import (
 from calibration import find_tilt, half_scan_slice, search_center
 from core.data_interface import DataInterface
 from orchestration import PipelineRun, ProgressEvent, load_config, save_config
-from preprocessing import build_reference, normalize_slice
+from preprocessing import build_reference, list_phase_methods, normalize_slice
 from reconstruction import get_backend, list_backends, resolve_device, to_uint16
 
 from orchestration import ram_check
+from gui.bh_info import DEFAULT_COEFFICIENTS, padded, summarize_beam_hardening
+from gui.phase_info import LABELS as PHASE_LABELS
+from gui.phase_info import ORIGIN_TEXT as PHASE_ORIGIN_TEXT
+from gui.phase_info import summarize_phase
 from gui.preview_engine import PreviewEngine
 from gui.reconstruct_dialog import ReconstructDestinationDialog
 from gui.reconstruct_plan import RememberedPaths, describe_error, describe_run, make_plan, rows_for_export, streaming_config
@@ -73,12 +79,14 @@ _DEVICE_CHOICES = [("Auto (prefer GPU)", None), ("CPU", "cpu"), ("GPU", "gpu")]
 
 class BasicSettingsTab(QWidget):
     geometry_type_changed = Signal(str)
+    distance_changed = Signal(str, float)      # "source_to_detector_distance" | "source_to_object_distance", mm
     angle_span_changed = Signal(float)
     pixel_size_changed = Signal(float)
     slice_changed = Signal(int)
     backend_changed = Signal(str)
     device_changed = Signal(object)  # None ("auto"), "cpu", or "gpu" -- see _DEVICE_CHOICES
     num_iter_changed = Signal(int)
+    filter_changed = Signal(str)
     center_changed = Signal(float)
     auto_update_toggled = Signal(bool)
     tilt_changed = Signal(float)
@@ -93,6 +101,22 @@ class BasicSettingsTab(QWidget):
         self.geometry_combo = QComboBox(self)
         self.geometry_combo.addItems(["", "parallel", "cone"])
         self.geometry_combo.currentTextChanged.connect(self.geometry_type_changed)
+
+        # Cone-beam only: the two distances FDK needs (known_fields' conditional "ask" fields).
+        self.distance_spins = {}
+        for key, tooltip in (
+            ("source_to_detector_distance", "Distance from the X-ray source to the detector, in mm."),
+            ("source_to_object_distance", "Distance from the X-ray source to the rotation axis, in mm. "
+             "The ratio of the two is the magnification; 'Pixel size' below is then the pixel size at the sample."),
+        ):
+            spin = QDoubleSpinBox(self)
+            spin.setRange(0.0, 1.0e7)
+            spin.setDecimals(2)
+            spin.setSuffix(" mm")
+            spin.setSpecialValueText("not set")
+            spin.setToolTip(tooltip)
+            spin.valueChanged.connect(lambda value, key=key: self.distance_changed.emit(key, value))
+            self.distance_spins[key] = spin
 
         # Only the span (end - start) is what completion/derivers.py's
         # derive_angles() actually consumes -- angles are always built
@@ -130,7 +154,7 @@ class BasicSettingsTab(QWidget):
         # installed (algotom_gridrec needs conda-only tomopy, the ASTRA ones need astra,
         # gridrec needs urct_gridrec) is simply not offered, and one a user adds
         # shows up here without touching this file. See reconstruction.list_backends().
-        self.backend_combo.addItems(list_backends())
+        self._fill_backends(list_backends(available_only=False))
         self.backend_combo.currentTextChanged.connect(self.backend_changed)
 
         # Only meaningful for the iterative backends (SIRT/SART/ART/CGLS
@@ -145,6 +169,15 @@ class BasicSettingsTab(QWidget):
         self.num_iter_spin.setRange(1, 10_000_000)
         self.num_iter_spin.valueChanged.connect(self.num_iter_changed)
         self.num_iter_label = QLabel("Iterations", self)
+
+        # The reconstruction filter; only for algorithms with a filter step (not the iterative ones).
+        self.filter_combo = QComboBox(self)
+        self.filter_combo.setToolTip(
+            "Smoothing applied to the ramp filter. 'ramp' is the sharpest and the noisiest; "
+            "hann, hamming, ... trade a little resolution for less noise."
+        )
+        self.filter_combo.currentTextChanged.connect(self.filter_changed)
+        self.filter_label = QLabel("Filter", self)
 
         self.device_combo = QComboBox(self)
         self.device_combo.addItems([label for label, _ in _DEVICE_CHOICES])
@@ -233,11 +266,16 @@ class BasicSettingsTab(QWidget):
         form = QFormLayout()
         form.addRow("", self.edit_loaded_checkbox)
         form.addRow("Geometry type", self.geometry_combo)
+        self.sdd_label = QLabel("Source-detector distance", self)
+        self.sod_label = QLabel("Source-object distance", self)
+        form.addRow(self.sdd_label, self.distance_spins["source_to_detector_distance"])
+        form.addRow(self.sod_label, self.distance_spins["source_to_object_distance"])
         form.addRow("Angle span", self.angle_span_spin)
         form.addRow("Pixel size", self.pixel_size_spin)
         form.addRow("Slice (z)", self.slice_spin)
         form.addRow("Reconstruction algorithm", self.backend_combo)
         form.addRow(self.num_iter_label, self.num_iter_spin)
+        form.addRow(self.filter_label, self.filter_combo)
         form.addRow("Device", self.device_combo)
         form.addRow("Center of rotation", self.center_spin)
         form.addRow("", self.auto_update_checkbox)
@@ -253,7 +291,20 @@ class BasicSettingsTab(QWidget):
         self.angle_span_spin.setEnabled(not self._angle_span_derived or allowed)
         self.pixel_size_spin.setEnabled(not self._pixel_size_derived or allowed)
 
-    def set_values(self, geometry_type: str, angle_span: float, angle_span_derived: bool, pixel_size: float, pixel_size_derived: bool, slice_index: int, slice_max: int, backend: str, num_iter: int, is_iterative: bool, device: Optional[str], center: float, tilt_deg: float, rotate_deg: float, width: int) -> None:
+    def _fill_backends(self, names: list) -> None:
+        """Fill the algorithm list. Entries whose packages are not installed stay visible
+        but greyed out, with the reason (and how to install) as their tooltip."""
+        self.backend_combo.clear()
+        self.backend_combo.addItems(names)
+        model = self.backend_combo.model()
+        for i, name in enumerate(names):
+            reason = get_backend(name).unavailable_reason()
+            if reason:
+                item = model.item(i)
+                item.setEnabled(False)
+                item.setToolTip(f"{name}: {reason}")
+
+    def set_values(self, geometry_type: str, angle_span: float, angle_span_derived: bool, pixel_size: float, pixel_size_derived: bool, slice_index: int, slice_max: int, backend: str, num_iter: int, is_iterative: bool, device: Optional[str], center: float, tilt_deg: float, rotate_deg: float, width: int, backends: Optional[list] = None, distances: Optional[dict] = None, filters: tuple = (), filter_name: Optional[str] = None) -> None:
         # setMaximum()/setRange() below can themselves clamp the
         # widget's current (still the *previous* session's) value and
         # emit valueChanged synchronously -- by the time that fires,
@@ -277,6 +328,18 @@ class BasicSettingsTab(QWidget):
             self.center_spin.setValue(center)
 
         self._silently(self.geometry_combo, lambda: self.geometry_combo.setCurrentText(geometry_type))
+        # Cone-beam: the two distances are shown (and FDK needs them); the algorithm list only holds
+        # backends that support the geometry, so a cone-beam project is never offered parallel-beam FBP.
+        cone = geometry_type == "cone"
+        for label, spin in ((self.sdd_label, self.distance_spins["source_to_detector_distance"]),
+                            (self.sod_label, self.distance_spins["source_to_object_distance"])):
+            label.setVisible(cone)
+            spin.setVisible(cone)
+        for key, spin in self.distance_spins.items():
+            value = (distances or {}).get(key)
+            self._silently(spin, lambda spin=spin, value=value: spin.setValue(0.0 if value is None else value))
+        if backends is not None and backends != [self.backend_combo.itemText(i) for i in range(self.backend_combo.count())]:
+            self._silently(self.backend_combo, lambda: self._fill_backends(backends))
         self._silently(self.angle_span_spin, lambda: self.angle_span_spin.setValue(angle_span))
         # angle_span_derived means the file's own recorded angles already
         # give an exact value (e.g. 179.55 deg for a 400-projection,
@@ -309,6 +372,10 @@ class BasicSettingsTab(QWidget):
         self._silently(self.slice_spin, _set_slice)
         self._silently(self.backend_combo, lambda: self.backend_combo.setCurrentText(backend))
         self._silently(self.num_iter_spin, lambda: self.num_iter_spin.setValue(num_iter))
+        self._silently(self.filter_combo, lambda: (self.filter_combo.clear(), self.filter_combo.addItems(list(filters)),
+                                                   filter_name in filters and self.filter_combo.setCurrentText(filter_name)))
+        self.filter_combo.setVisible(bool(filters))
+        self.filter_label.setVisible(bool(filters))
         self.num_iter_spin.setVisible(is_iterative)
         self.num_iter_label.setVisible(is_iterative)
         self.num_iter_spin.setToolTip(
@@ -458,6 +525,45 @@ class RefinementsTab(QWidget):
     zinger_removal_toggled = Signal(bool)
     zinger_threshold_changed = Signal(float)
     zinger_size_changed = Signal(int)
+    phase_toggled = Signal(bool)
+    phase_method_changed = Signal(str)
+    phase_value_changed = Signal(str, float)     # "delta_beta" | "distance" | "energy" | "pixel", new value (0 = not set)
+    bh_toggled = Signal(bool)
+    bh_coefficient_changed = Signal(int, float)  # index (0 = c1), new value
+
+    # beam hardening: (label, minimum, maximum, decimals, single step, tooltip)
+    _BH_SPINS = (
+        ("c1", 0.05, 10.0, 4, 0.01, "Linear term. Leave at 1 unless the scale of the attenuation should change."),
+        ("c2 (p^2)", -5.0, 5.0, 5, 0.01,
+         "The main knob: positive values raise the attenuation of thick parts relative to thin ones, which "
+         "lifts the middle of a uniform object (removes cupping)."),
+        ("c3 (p^3)", -2.0, 2.0, 6, 0.005, "Fine adjustment for strong hardening; usually small and negative."),
+    )
+
+    # name used in phase_value_changed -> (label, maximum, decimals, suffix, tooltip)
+    _PHASE_SPINS = {
+        "delta_beta": (
+            "delta/beta", 1.0e6, 1, "",
+            "Ratio of the sample material's refractive-index decrement to its absorption index. Material "
+            "dependent (roughly 50-1000 for soft tissue and polymers at tens of keV) and in practice a "
+            "tuning knob: larger values smooth more (less noise, less detail). Set to 0 for 'not set'.",
+        ),
+        "distance": (
+            "Propagation distance", 1.0e6, 1, " mm",
+            "Distance from the sample to the detector. Taken from the file when it records it; type a value "
+            "to override it, set 0 to go back to the file's value.",
+        ),
+        "energy": (
+            "Energy", 1000.0, 2, " keV",
+            "X-ray energy. Taken from the file when it records it; type a value to override it, "
+            "set 0 to go back to the file's value.",
+        ),
+        "pixel": (
+            "Pixel size", 1.0e5, 4, " um",
+            "Effective pixel size at the sample. Taken from the file or from Basic settings' pixel size "
+            "(a default nobody set does not count); type a value to override it.",
+        ),
+    }
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -521,12 +627,88 @@ class RefinementsTab(QWidget):
         form.addRow("Zinger threshold", self.zinger_threshold_spin)
         form.addRow("Zinger size", self.zinger_size_spin)
 
+        # -- phase retrieval (preprocessing/phase.py): removes the edge fringes of propagation-based
+        # phase-contrast images. Runs after zinger removal and before ring removal.
+        self.phase_group = QGroupBox("Phase retrieval", self)
+        self.phase_checkbox = QCheckBox("Retrieve phase (propagation-based phase contrast)", self)
+        self.phase_checkbox.setToolTip(
+            "For images taken with a coherent beam and some distance between sample and detector: "
+            "the sample's phase shifts show up as bright/dark fringes along edges. This filters them "
+            "out (Paganin's method) so the reconstruction sees a clean projected thickness. "
+            "Assumes one homogeneous material."
+        )
+        self.phase_checkbox.toggled.connect(self.phase_toggled)
+        self.phase_checkbox.toggled.connect(self._on_phase_toggled_enabled)
+        self.phase_method_combo = QComboBox(self)
+        self.phase_method_combo.addItems(list_phase_methods())
+        self.phase_method_combo.currentTextChanged.connect(self.phase_method_changed)
+
+        self.phase_spins: dict[str, QDoubleSpinBox] = {}
+        self.phase_origin_labels: dict[str, QLabel] = {}
+        phase_form = QFormLayout()
+        phase_form.addRow("", self.phase_checkbox)
+        phase_form.addRow("Method", self.phase_method_combo)
+        for key, (label, maximum, decimals, suffix, tooltip) in self._PHASE_SPINS.items():
+            spin = QDoubleSpinBox(self)
+            spin.setRange(0.0, maximum)
+            spin.setDecimals(decimals)
+            spin.setSuffix(suffix)
+            spin.setSpecialValueText("not set")
+            spin.setStepType(QAbstractSpinBox.AdaptiveDecimalStepType)
+            spin.setToolTip(tooltip)
+            spin.valueChanged.connect(lambda value, key=key: self.phase_value_changed.emit(key, value))
+            origin = QLabel("", self)
+            row = QHBoxLayout()
+            row.addWidget(spin)
+            row.addWidget(origin)
+            phase_form.addRow(label, row)
+            self.phase_spins[key] = spin
+            self.phase_origin_labels[key] = origin
+        self.phase_info_label = QLabel("", self)
+        self.phase_info_label.setWordWrap(True)
+        phase_layout = QVBoxLayout(self.phase_group)
+        phase_layout.addLayout(phase_form)
+        phase_layout.addWidget(self.phase_info_label)
+
+        # -- beam hardening (preprocessing/beam_hardening.py): the last correction before reconstruction.
+        self.bh_group = QGroupBox("Beam hardening", self)
+        self.bh_checkbox = QCheckBox("Correct beam hardening (cupping)", self)
+        self.bh_checkbox.setToolTip(
+            "A beam with many energies loses its soft photons first, so thick parts absorb less per cm "
+            "than thin ones and the middle of a uniform object looks too dark. This replaces the "
+            "attenuation p by c1*p + c2*p^2 + c3*p^3, which makes it proportional to thickness again "
+            "(for one dominant material)."
+        )
+        self.bh_checkbox.toggled.connect(self.bh_toggled)
+        self.bh_checkbox.toggled.connect(self._on_bh_toggled_enabled)
+        self.bh_spins: list[QDoubleSpinBox] = []
+        bh_form = QFormLayout()
+        bh_form.addRow("", self.bh_checkbox)
+        for index, (label, minimum, maximum, decimals, step, tooltip) in enumerate(self._BH_SPINS):
+            spin = QDoubleSpinBox(self)
+            spin.setRange(minimum, maximum)
+            spin.setDecimals(decimals)
+            spin.setSingleStep(step)
+            spin.setToolTip(tooltip)
+            spin.valueChanged.connect(lambda value, index=index: self.bh_coefficient_changed.emit(index, value))
+            bh_form.addRow(label, spin)
+            self.bh_spins.append(spin)
+        self.bh_info_label = QLabel("", self)
+        self.bh_info_label.setWordWrap(True)
+        bh_layout = QVBoxLayout(self.bh_group)
+        bh_layout.addLayout(bh_form)
+        bh_layout.addWidget(self.bh_info_label)
+
         layout = QVBoxLayout(self)
         layout.addLayout(form)
+        layout.addWidget(self.phase_group)
+        layout.addWidget(self.bh_group)
         layout.addStretch()
 
         self._on_ring_toggled(False)
         self._on_zinger_toggled(False)
+        self._on_phase_toggled_enabled(False)
+        self._on_bh_toggled_enabled(False)
 
     def _on_ring_toggled(self, checked: bool) -> None:
         self.ring_method_combo.setEnabled(checked)
@@ -534,6 +716,57 @@ class RefinementsTab(QWidget):
     def _on_zinger_toggled(self, checked: bool) -> None:
         self.zinger_threshold_spin.setEnabled(checked)
         self.zinger_size_spin.setEnabled(checked)
+
+    def _on_phase_toggled_enabled(self, checked: bool) -> None:
+        self.phase_method_combo.setEnabled(checked)
+        for spin in self.phase_spins.values():
+            spin.setEnabled(checked)
+
+    def _on_bh_toggled_enabled(self, checked: bool) -> None:
+        for spin in self.bh_spins:
+            spin.setEnabled(checked)
+
+    def set_beam_hardening(self, enabled: bool, coefficients: tuple, text: str, ok: bool) -> None:
+        """Show the beam hardening state without emitting any change signal."""
+        widgets = [self.bh_checkbox, *self.bh_spins]
+        for widget in widgets:
+            widget.blockSignals(True)
+        self.bh_checkbox.setChecked(enabled)
+        self._on_bh_toggled_enabled(enabled)
+        for spin, value in zip(self.bh_spins, coefficients):
+            spin.setValue(value)
+        for widget in widgets:
+            widget.blockSignals(False)
+        self.set_beam_hardening_info(text, ok, enabled)
+
+    def set_beam_hardening_info(self, text: str, ok: bool, enabled: bool) -> None:
+        self.bh_info_label.setText(text)
+        self.bh_info_label.setStyleSheet("" if (ok or not enabled) else "color: #c0392b;")
+
+    def set_phase(self, enabled: bool, method: str, values: dict, origins: dict, text: str, ok: bool) -> None:
+        """Show the phase retrieval state without emitting any change signal.
+        `values`: {"delta_beta"|"distance"|"energy"|"pixel": float or None}; `origins` the same keys
+        -> short text such as "from the file"."""
+        widgets = [self.phase_checkbox, self.phase_method_combo, *self.phase_spins.values()]
+        for widget in widgets:
+            widget.blockSignals(True)
+        self.phase_checkbox.setChecked(enabled)
+        self._on_phase_toggled_enabled(enabled)
+        if self.phase_method_combo.findText(method) < 0:
+            self.phase_method_combo.addItem(method)
+        self.phase_method_combo.setCurrentText(method)
+        for key, spin in self.phase_spins.items():
+            value = values.get(key)
+            spin.setValue(0.0 if value is None else value)
+        for widget in widgets:
+            widget.blockSignals(False)
+        self.set_phase_info(origins, text, ok, enabled)
+
+    def set_phase_info(self, origins: dict, text: str, ok: bool, enabled: bool) -> None:
+        for key, label in self.phase_origin_labels.items():
+            label.setText(f"({origins.get(key, '')})" if origins.get(key) else "")
+        self.phase_info_label.setText(text)
+        self.phase_info_label.setStyleSheet("" if (ok or not enabled) else "color: #c0392b;")
 
     def set_values(
         self, ring_correction: bool, ring_method: str, zinger_removal: bool, zinger_threshold: float, zinger_size: int,
@@ -820,11 +1053,13 @@ class AdjustmentPanel(QWidget):
         layout.addLayout(recon_row)
 
         self.basic_tab.geometry_type_changed.connect(self._on_geometry_type_changed)
+        self.basic_tab.distance_changed.connect(self._on_distance_changed)
         self.basic_tab.angle_span_changed.connect(self._on_angle_span_changed)
         self.basic_tab.pixel_size_changed.connect(self._on_pixel_size_changed)
         self.basic_tab.slice_changed.connect(self._on_slice_changed)
         self.basic_tab.backend_changed.connect(self._on_backend_changed)
         self.basic_tab.num_iter_changed.connect(self._on_num_iter_changed)
+        self.basic_tab.filter_changed.connect(self._on_filter_changed)
         self.basic_tab.device_changed.connect(self._on_device_changed)
         self.basic_tab.center_changed.connect(self._on_center_changed)
         self.basic_tab.tilt_changed.connect(self._on_tilt_changed)
@@ -835,6 +1070,11 @@ class AdjustmentPanel(QWidget):
         self.refinements_tab.zinger_removal_toggled.connect(self._on_zinger_removal_toggled)
         self.refinements_tab.zinger_threshold_changed.connect(self._on_zinger_threshold_changed)
         self.refinements_tab.zinger_size_changed.connect(self._on_zinger_size_changed)
+        self.refinements_tab.phase_toggled.connect(self._on_phase_toggled)
+        self.refinements_tab.phase_method_changed.connect(self._on_phase_method_changed)
+        self.refinements_tab.phase_value_changed.connect(self._on_phase_value_changed)
+        self.refinements_tab.bh_toggled.connect(self._on_bh_toggled)
+        self.refinements_tab.bh_coefficient_changed.connect(self._on_bh_coefficient_changed)
         self.basic_tab.load_config_requested.connect(self._load_config_file)
         self.basic_tab.export_config_requested.connect(self._export_config)
         self.basic_tab.export_config_as_requested.connect(self._export_config_as)
@@ -913,6 +1153,8 @@ class AdjustmentPanel(QWidget):
             if resolved_pixel_size is not None:
                 pixel_size = resolved_pixel_size
                 pixel_size_derived = di.get_metadata_source("voxel_size") == "file"
+        if config.completion_answers.get("geometry_type"):
+            geometry_type = config.completion_answers["geometry_type"]       # what the user just chose wins over the imported value
         if "angle_span" in config.completion_answers:
             angle_span = config.completion_answers["angle_span"]  # a value the user already typed wins over the file's
             angle_span_derived = False  # still an editable answer, not yet re-resolved from data
@@ -943,7 +1185,26 @@ class AdjustmentPanel(QWidget):
                 n_angles * width if config.reconstruction_backend == "algotom_art" else _DEFAULT_NUM_ITER
             )
 
+        # Only backends that support this project's geometry; if the chosen one does not (e.g. the
+        # geometry was just switched to cone), take the first that does.
+        usable = list_backends(geometry=geometry_type or None)
+        listed = list_backends(available_only=False, geometry=geometry_type or None)
+        if usable and config.reconstruction_backend not in usable:
+            config.reconstruction_backend = usable[0]
+        elif not usable and geometry_type:
+            self.status_message.emit(
+                f"no {geometry_type}-beam reconstruction backend is installed"
+                + (" -- pip install itk-rtk (the 'cone' extra)" if geometry_type == "cone" else "")
+            )
+        distances = {}
+        for key in ("source_to_detector_distance", "source_to_object_distance"):
+            answer = config.completion_answers.get(key)
+            distances[key] = float(answer) if answer not in (None, "") else (
+                DataInterface(project).get_metadata(key) if project is not None else None
+            )
         self.basic_tab.set_values(
+            backends=listed if listed or geometry_type else None,
+            distances=distances,
             geometry_type=geometry_type,
             angle_span=angle_span,
             angle_span_derived=angle_span_derived,
@@ -954,6 +1215,8 @@ class AdjustmentPanel(QWidget):
             backend=config.reconstruction_backend,
             num_iter=config.reconstruction_options.get("num_iter", _DEFAULT_NUM_ITER),
             is_iterative=get_backend(config.reconstruction_backend).is_iterative,
+            filters=get_backend(config.reconstruction_backend).filters,
+            filter_name=config.reconstruction_filter or get_backend(config.reconstruction_backend).default_filter,
             device=config.device,
             center=config.center if config.center is not None else 0.0,
             tilt_deg=config.tilt_deg if config.tilt_deg is not None else 0.0,
@@ -968,6 +1231,8 @@ class AdjustmentPanel(QWidget):
             zinger_size=config.zinger_size if config.zinger_size is not None else 2,
             projections_normalized=config.projections_normalized,
         )
+        self._refresh_phase_controls()
+        self._refresh_beam_hardening_controls()
         rows_from, rows_to = session.export_rows or (0, max(n_rows - 1, 0))
         self.save_tab.set_values(
             dtype=config.dtype,
@@ -991,6 +1256,16 @@ class AdjustmentPanel(QWidget):
         if self.session is None or not value:
             return
         self.session.config.completion_answers["geometry_type"] = value
+        self._refresh_from_session()      # the algorithm list and the cone-beam fields depend on it
+
+    def _on_distance_changed(self, key: str, value: float) -> None:
+        if self.session is None:
+            return
+        if value > 0:
+            self.session.config.completion_answers[key] = value
+        else:
+            self.session.config.completion_answers.pop(key, None)
+        self.session_changed.emit(self.session)
 
     def _on_angle_span_changed(self, value: float) -> None:
         if self.session is not None:
@@ -1007,6 +1282,8 @@ class AdjustmentPanel(QWidget):
     def _on_backend_changed(self, value: str) -> None:
         if self.session is not None and value:
             self.session.config.reconstruction_backend = value
+            if self.session.config.reconstruction_filter not in (None, *get_backend(value).filters):
+                self.session.config.reconstruction_filter = None      # this algorithm has no such filter
             # Re-syncs num_iter_spin's visibility/tooltip/value for the
             # new backend (seeding a first-time default if it's iterative
             # and none exists yet) -- see the "num_iter" seeding block in
@@ -1014,6 +1291,10 @@ class AdjustmentPanel(QWidget):
             # value it touches is either read straight back from config/
             # session or a "resolve once" field that's already resolved.
             self._refresh_from_session()
+
+    def _on_filter_changed(self, value: str) -> None:
+        if self.session is not None and value:
+            self.session.config.reconstruction_filter = value
 
     def _on_num_iter_changed(self, value: int) -> None:
         if self.session is not None:
@@ -1092,6 +1373,107 @@ class AdjustmentPanel(QWidget):
     def _on_zinger_size_changed(self, value: int) -> None:
         if self.session is not None:
             self.session.config.zinger_size = value
+
+    # -- phase retrieval -----------------------------------------------------------------
+
+    # tab key -> ProjectConfig field
+    _PHASE_FIELDS = {
+        "delta_beta": "phase_delta_beta", "distance": "phase_distance_mm",
+        "energy": "phase_energy_kev", "pixel": "phase_pixel_um",
+    }
+    _PHASE_INPUT_NAMES = {
+        "delta_beta": "delta_over_beta", "distance": "distance_mm", "energy": "energy_kev", "pixel": "pixel_um",
+    }
+
+    def _phase_state(self):
+        """(values, origins, summary) for the open session, in the tab's own key names."""
+        session = self.session
+        project = session.run.project if session.run is not None else None
+        summary = summarize_phase(project, session.config)
+        values, origins = {}, {}
+        for key, name in self._PHASE_INPUT_NAMES.items():
+            value, origin = summary.values[name]
+            values[key] = value
+            origins[key] = PHASE_ORIGIN_TEXT[origin] if value is not None else ""
+        return values, origins, summary
+
+    def _refresh_phase_controls(self) -> None:
+        """Re-read everything from the session (config, else the file's metadata) into the controls."""
+        if self.session is None:
+            return
+        values, origins, summary = self._phase_state()
+        config = self.session.config
+        self.refinements_tab.set_phase(config.phase_retrieval, config.phase_method, values, origins, summary.text, summary.ok)
+
+    def _update_phase_info(self):
+        values, origins, summary = self._phase_state()
+        config = self.session.config
+        self.refinements_tab.set_phase_info(origins, summary.text, summary.ok, config.phase_retrieval)
+        return summary
+
+    def _after_phase_change(self) -> None:
+        summary = self._update_phase_info()
+        self.session_changed.emit(self.session)
+        # Tuning delta/beta is exactly what auto-update is for -- but not while the settings are incomplete.
+        if self._auto_update and self.session.imported and (summary.ok or not self.session.config.phase_retrieval):
+            self._auto_update_timer.start()
+
+    def _on_phase_toggled(self, checked: bool) -> None:
+        if self.session is None:
+            return
+        self.session.config.phase_retrieval = checked
+        self._after_phase_change()
+        summary = self._update_phase_info()
+        if checked and not summary.ok:
+            needed = ", ".join(PHASE_LABELS[name] for name in summary.missing) or "valid settings"
+            self.status_message.emit(f"phase retrieval needs: {needed}")
+
+    def _on_phase_method_changed(self, name: str) -> None:
+        if self.session is not None and name:
+            self.session.config.phase_method = name
+            self._after_phase_change()
+
+    def _on_phase_value_changed(self, key: str, value: float) -> None:
+        if self.session is None:
+            return
+        setattr(self.session.config, self._PHASE_FIELDS[key], value if value > 0 else None)
+        if value <= 0:
+            self._refresh_phase_controls()      # back to the file's value, if it has one
+        self._after_phase_change()
+
+    # -- beam hardening ------------------------------------------------------------------
+
+    def _refresh_beam_hardening_controls(self) -> None:
+        if self.session is None:
+            return
+        config = self.session.config
+        summary = summarize_beam_hardening(config)
+        self.refinements_tab.set_beam_hardening(config.beam_hardening, summary.coefficients, summary.text, summary.ok)
+
+    def _after_beam_hardening_change(self) -> None:
+        config = self.session.config
+        summary = summarize_beam_hardening(config)
+        self.refinements_tab.set_beam_hardening_info(summary.text, summary.ok, config.beam_hardening)
+        self.session_changed.emit(self.session)
+        if self._auto_update and self.session.imported and (summary.ok or not config.beam_hardening):
+            self._auto_update_timer.start()
+
+    def _on_bh_toggled(self, checked: bool) -> None:
+        if self.session is None:
+            return
+        config = self.session.config
+        config.beam_hardening = checked
+        if checked and not config.bh_coefficients:
+            config.bh_coefficients = DEFAULT_COEFFICIENTS       # starts as "changes nothing"
+        self._after_beam_hardening_change()
+
+    def _on_bh_coefficient_changed(self, index: int, value: float) -> None:
+        if self.session is None:
+            return
+        values = list(padded(self.session.config.bh_coefficients))
+        values[index] = value
+        self.session.config.bh_coefficients = tuple(values)
+        self._after_beam_hardening_change()
 
     def _on_save_settings_changed(self) -> None:
         if self.session is None:

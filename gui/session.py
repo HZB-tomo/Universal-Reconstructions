@@ -45,7 +45,7 @@ class ProjectSession:
     # (Reconstruct all slices, "Keep in memory only") the array itself.
     # Single-slice previews set neither.
     volume_path: Optional[str] = None
-    volume_dataset: str = "/volume"
+    volume_dataset: str = "/entry/volume/data"
     ram_volume: Optional[np.ndarray] = None
     # Where the viewer was left for this project, per view ("projections" /
     # "reconstruction"): slicing direction, slice number, zoom. See

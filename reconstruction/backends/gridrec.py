@@ -46,6 +46,9 @@ class GridrecBackend(ReconstructionBackend):
     name = "gridrec"
     supported_geometries = {"parallel"}
     requires = ("urct_gridrec", "numba")
+    install_hint = "Install with: pip install -e ./gridrec_project, then pip install -e \".[gridrec]\""
+    filters = ("ramp", "hann", "hamming", "cosine", "shepp-logan")
+    default_filter = "hann"
 
     def reconstruct(
         self,

@@ -47,8 +47,8 @@ def test_tomo_run_with_projections_normalized_and_angle_span(converted, tmp_path
 
     assert main(["run", str(config)]) == 0
     with h5py.File(out, "r") as f:
-        assert f["/volume"].shape == (16, 32, 32)
-        assert np.isfinite(f["/volume"][()]).all()
+        assert f["/entry/volume/data"].shape == (16, 32, 32)
+        assert np.isfinite(f["/entry/volume/data"][()]).all()
 
 
 def test_tomo_validate_accepts_the_converted_file(converted, tmp_path):

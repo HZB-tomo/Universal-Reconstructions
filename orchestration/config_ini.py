@@ -71,6 +71,16 @@ def _parse_crop(v: str) -> tuple:
     return ((z0, z1), (y0, y1), (x0, x1))
 
 
+def _parse_floats(v: str) -> tuple:
+    try:
+        values = tuple(float(p) for p in v.split(",") if p.strip())
+    except ValueError:
+        raise ValueError(f"expected comma-separated numbers, got {v!r}") from None
+    if not values:
+        raise ValueError(f"expected at least one number, got {v!r}")
+    return values
+
+
 def _parse_rows(v: str) -> slice:
     parts = [p.strip() for p in v.split(",")]
     if len(parts) != 2:
@@ -98,6 +108,14 @@ FIELD_SPECS: dict[str, dict[str, tuple]] = {
         "zinger_size": ("zinger_size", int),
         "ring_correction": ("ring_correction", _parse_bool),
         "ring_method": ("ring_method", str),
+        "phase_retrieval": ("phase_retrieval", _parse_bool),
+        "phase_method": ("phase_method", str),
+        "phase_delta_beta": ("phase_delta_beta", float),
+        "phase_distance_mm": ("phase_distance_mm", float),
+        "phase_energy_kev": ("phase_energy_kev", float),
+        "phase_pixel_um": ("phase_pixel_um", float),
+        "beam_hardening": ("beam_hardening", _parse_bool),
+        "bh_coefficients": ("bh_coefficients", _parse_floats),
     },
     "calibration": {
         "backend": ("calibration_backend", str),
@@ -110,6 +128,7 @@ FIELD_SPECS: dict[str, dict[str, tuple]] = {
     "reconstruction": {
         "backend": ("reconstruction_backend", str),
         "device": ("device", str),
+        "filter": ("reconstruction_filter", str),
         "rotate_deg": ("rotate_deg", float),
     },
     "postprocess": {
@@ -137,6 +156,8 @@ def _format_value(value, parse) -> Optional[str]:
     if parse is _parse_crop:
         (z0, z1), (y0, y1), (x0, x1) = value
         return f"{z0},{z1},{y0},{y1},{x0},{x1}"
+    if parse is _parse_floats:
+        return ", ".join(repr(float(v)) for v in value)
     if parse is _parse_rows:
         if not isinstance(value, slice):
             return None  # can't represent a non-slice rows value in this grammar
@@ -307,6 +328,13 @@ storage_mode = ram
 # projections_normalized = true   # projections already flat/dark corrected: skip that step
 # zinger_removal = true
 # ring_correction = true
+# phase_retrieval = true  # propagation-based phase contrast (Paganin); needs delta/beta, and energy,
+# phase_delta_beta =      #   distance and pixel size from the file or from the lines below
+# phase_distance_mm =     # sample-to-detector distance
+# phase_energy_kev =
+# phase_pixel_um =        # effective pixel size at the sample
+# beam_hardening = true   # polynomial linearization of the attenuation (removes cupping)
+# bh_coefficients = 1, 0.3, -0.04   # c1, c2, c3, ... of  p_corrected = c1 p + c2 p^2 + c3 p^3
 
 [calibration]
 # center =             # blank = auto find_center()
@@ -314,6 +342,7 @@ storage_mode = ram
 
 [reconstruction]
 backend = algotom_fbp
+# filter = hann        # ramp (sharpest, noisiest), hann, hamming, ...; blank = the algorithm's default
 # rotate_deg =         # blank = no rotation; degrees about the scan axis
 
 [postprocess]

@@ -43,6 +43,25 @@ class ProjectConfig:
     ring_correction: bool = False
     ring_method: str = "sorting"
     ring_options: dict = field(default_factory=dict)         # algorithm-specific, code-only
+    # Phase retrieval (propagation-based phase contrast), after zinger removal
+    # and before ring removal -- see preprocessing/phase.py. When on, delta/beta
+    # has no default (it depends on the material); the other numbers fall back to
+    # the project's metadata: energy -> 'energy', distance -> 'propagation_distance',
+    # pixel size -> a real 'voxel_size' (not the silent 1.0 um default).
+    phase_retrieval: bool = False
+    phase_method: str = "paganin"
+    phase_delta_beta: Optional[float] = None     # delta/beta of the sample material
+    phase_distance_mm: Optional[float] = None     # sample-to-detector; None = metadata
+    phase_energy_kev: Optional[float] = None      # None = metadata
+    phase_pixel_um: Optional[float] = None        # effective pixel size at the sample; None = metadata
+    phase_options: dict = field(default_factory=dict)         # method-specific, code-only
+    # Beam hardening correction (polynomial linearization of the attenuation),
+    # after ring removal -- see preprocessing/beam_hardening.py. The coefficients
+    # (c1, c2, c3, ...) of  p_corrected = c1*p + c2*p^2 + c3*p^3 + ... have no
+    # default: (1, 0, 0) changes nothing. bh_options: {"max_attenuation": ...}.
+    beam_hardening: bool = False
+    bh_coefficients: Optional[tuple] = None
+    bh_options: dict = field(default_factory=dict)            # code-only
 
     # -- calibration ------------------------------------------------------------
     calibration_backend: str = "algotom"
@@ -63,6 +82,9 @@ class ProjectConfig:
     reconstruction_backend: str = "algotom_fbp"
     device: Optional[str] = None
     reconstruction_options: dict = field(default_factory=dict)  # backend-specific, code-only
+    # Reconstruction filter (ramp, hann, ...), see ReconstructionBackend.filters. None = the backend's
+    # default. Ignored by backends without a filter step (iterative ones).
+    reconstruction_filter: Optional[str] = None
     # Rotate the reconstructed volume by this many degrees about the scan
     # axis (every xy slice, uniformly). None/0.0 = no rotation. See
     # reconstruction.rotation.reconstruct_rotated() -- rotates the
@@ -80,7 +102,7 @@ class ProjectConfig:
     # -- export -------------------------------------------------------------------
     export_format: Literal["tiff", "hdf5"] = "hdf5"
     export_path: Optional[str] = None            # template; see resolved_project_id()
-    export_dataset_path: str = "/volume"
+    export_dataset_path: str = "/entry/volume/data"
     export_extra_settings: dict = field(default_factory=dict)
 
     # Reconstruct and write one chunk of rows (slices) at a time
@@ -93,6 +115,18 @@ class ProjectConfig:
     # overrides that.
     stream: bool = False
     stream_chunk_rows: Optional[int] = None
+
+    def backend_options(self) -> dict:
+        """The options handed to the reconstruction backend: `reconstruction_options`
+        plus the chosen filter (as `filter_name`) when the backend has a filter
+        step and `reconstruction_options` does not already name one."""
+        from reconstruction import get_backend
+
+        options = dict(self.reconstruction_options)
+        if self.reconstruction_filter and "filter_name" not in options:
+            if get_backend(self.reconstruction_backend).filters:
+                options["filter_name"] = self.reconstruction_filter
+        return options
 
     def resolved_project_id(self) -> str:
         """project_id if set, else the stem of `path` (the data file's

@@ -51,7 +51,7 @@ def test_a_different_center_row_or_setting_is_a_miss(project_and_config):
 
 
 def test_the_sinogram_is_prepared_once_per_row_however_many_centers(project_and_config, monkeypatch):
-    import gui.preview_engine as pe
+    import orchestration.preprocess as pe
 
     project, config = project_and_config
     calls = []

@@ -62,6 +62,7 @@ class AlgotomBpBackend(ReconstructionBackend):
     name = "algotom_bp"
     supported_geometries = {"parallel"}
     requires = ("algotom", "astra")   # astra: the astra-toolbox package
+    install_hint = "Install with: conda install -c astra-toolbox astra-toolbox (not available on pip)"
     _method_base = "BP"
 
     def reconstruct(

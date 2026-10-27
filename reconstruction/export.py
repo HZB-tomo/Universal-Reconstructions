@@ -1,9 +1,10 @@
 """
 save_volume(): writes a reconstructed volume to disk, as a TIFF stack
-or a single HDF5 dataset, with an optional JSON settings/provenance
-record (backend used, center, tilt, ring correction, crop, dtype
-clipping, ...; see core/project.py's ProjectObject.export_metadata()
-for pulling acquisition metadata into the same dict).
+or as a volume file of the URCT HDF5 standard (reconstruction/volume_file.py,
+doc/FILE_STANDARD.md), with an optional settings/provenance dict (backend
+used, center, tilt, ring correction, crop, dtype clipping, ...; see
+core/project.py's ProjectObject.export_metadata() for pulling acquisition
+metadata into the same dict).
 
 StreamingVolumeWriter is save_volume()'s incremental counterpart, for
 a caller (PipelineRun._run_streaming()) that reconstructs one chunk of
@@ -18,12 +19,15 @@ from typing import Literal, Optional, Union
 
 import numpy as np
 
+from core import urct_format as fmt
+from reconstruction import volume_file
+
 
 def save_volume(
     volume: np.ndarray,
     path: Union[str, Path],
     format: Literal["tiff", "hdf5"],
-    dataset_path: str = "/volume",
+    dataset_path: str = fmt.VOLUME,
     settings: Optional[dict] = None,
 ) -> None:
     """
@@ -35,22 +39,26 @@ def save_volume(
     `slice_00001.tif`, ... . This is the same folder-of-files layout
     data_import's TiffBackend reads.
 
-    format="hdf5" writes a single dataset at `dataset_path` inside the
-    HDF5 file at `path` (created, or overwritten if it already exists).
+    format="hdf5" writes a volume file of the URCT standard at `path`
+    (created, or overwritten if it already exists): the volume at
+    `dataset_path` (default /entry/volume/data; chunked in cubes of 64, not
+    compressed), the reconstruction record, and the measurement metadata.
 
     `settings`, if given, is a plain dict recording anything about how
     this volume was produced: reconstruction backend and options,
     center, tilt, whether ring correction ran, crop bounds, dtype-clip
     range, or acquisition metadata from ProjectObject.export_metadata().
-    Written as JSON: an HDF5 attribute (`reconstruction_settings`, on
-    the dataset) for format="hdf5", or a `metadata.json` file alongside
-    the slices for format="tiff". Values must be JSON-serializable;
-    numpy scalars and arrays are converted automatically.
+    For format="hdf5" the known entries are filed into the standard's
+    reconstruction record and measurement groups (see volume_file.py),
+    and the whole dict is also kept as JSON in the dataset's
+    `reconstruction_settings` attribute; for format="tiff" it is a
+    `metadata.json` file alongside the slices. Values must be
+    JSON-serializable; numpy scalars and arrays are converted automatically.
 
-    Neither format records units on its own. See reconstruct()'s
-    docstring for what a volume's values mean (1/px or 1/um, depending
-    on whether geometry.detector_pixel_size was set) -- worth carrying
-    in `settings` if this volume will outlive the session that made it.
+    An HDF5 volume records its units (1/cm when settings holds the
+    detector_pixel_size, else 1/px) and, for uint16, the scale and offset
+    that turn stored values back into physical ones. TIFF stacks record
+    nothing of the sort on their own; see reconstruct()'s docstring.
     """
     volume = np.asarray(volume)
     if volume.ndim == 2:
@@ -97,13 +105,9 @@ def _save_tiff_stack(volume: np.ndarray, folder: Path, settings: Optional[dict])
 
 
 def _save_hdf5(volume: np.ndarray, path: Path, dataset_path: str, settings: Optional[dict]) -> None:
-    import h5py  # imported here so this package stays importable without h5py installed
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with h5py.File(path, "w") as f:
-        dataset = f.create_dataset(dataset_path, data=volume)
-        if settings:
-            dataset.attrs["reconstruction_settings"] = json.dumps(_to_jsonable(settings))
+    f, dataset = volume_file.create_volume_file(path, volume.shape, volume.dtype, settings, dataset_path)
+    with f:
+        dataset[...] = volume
 
 
 class StreamingVolumeWriter:
@@ -140,10 +144,11 @@ class StreamingVolumeWriter:
         height: int,
         width: int,
         dtype,
-        dataset_path: str = "/volume",
+        dataset_path: str = fmt.VOLUME,
         settings: Optional[dict] = None,
     ):
         self._format = format
+        self._blocks: dict = {}
         self._n_digits = max(5, len(str(max(total_slices - 1, 0))))
 
         if format == "tiff":
@@ -157,14 +162,18 @@ class StreamingVolumeWriter:
             if settings:
                 (self._folder / "metadata.json").write_text(json.dumps(_to_jsonable(settings), indent=2))
         elif format == "hdf5":
-            import h5py  # imported here so this package stays importable without h5py installed
-
-            path = Path(path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            self._file = h5py.File(path, "w")
-            self._dataset = self._file.create_dataset(dataset_path, shape=(total_slices, height, width), dtype=dtype)
-            if settings:
-                self._dataset.attrs["reconstruction_settings"] = json.dumps(_to_jsonable(settings))
+            self._file, self._dataset = volume_file.create_volume_file(
+                path, (total_slices, height, width), dtype, settings, dataset_path,
+            )
+            # Chunks are 64 slices deep. Writing a few slices into a chunk would read and rewrite it
+            # again and again, so the slices are collected into whole 64-slice blocks first (as long
+            # as a block is not huge) and each block is written once.
+            self._depth = self._dataset.chunks[0]
+            block_bytes = self._depth * height * width * np.dtype(dtype).itemsize
+            self._buffered = self._depth > 1 and block_bytes <= volume_file.BUFFER_LIMIT
+            self._total = total_slices
+            self._shape = (height, width)
+            self._dtype = np.dtype(dtype)
         else:
             raise ValueError(f"Unknown format {format!r}, expected 'tiff' or 'hdf5'")
 
@@ -175,12 +184,38 @@ class StreamingVolumeWriter:
         if self._format == "tiff":
             for i, image in enumerate(chunk):
                 self._tifffile.imwrite(self._folder / f"slice_{z_offset + i:0{self._n_digits}d}.tif", image)
+        elif not self._buffered:
+            self._dataset[z_offset:z_offset + chunk.shape[0]] = chunk
         else:
-            n = chunk.shape[0]
-            self._dataset[z_offset:z_offset + n] = chunk
+            depth = self._depth
+            z, end = z_offset, z_offset + chunk.shape[0]
+            while z < end:
+                block = z // depth
+                start = block * depth
+                stop = min(start + depth, self._total)
+                part = min(end, stop)
+                entry = self._blocks.get(block)
+                if entry is None:
+                    entry = self._blocks[block] = [np.zeros((stop - start, *self._shape), dtype=self._dtype), 0]
+                entry[0][z - start:part - start] = chunk[z - z_offset:part - z_offset]
+                entry[1] += part - z
+                if entry[1] >= stop - start:
+                    self._dataset[start:stop] = entry[0]
+                    del self._blocks[block]
+                z = part
+
+    def update_record(self, **entries) -> None:
+        """Add or replace reconstruction-record entries after the run (timings, speed, ...),
+        by their settings names: duration_s, speed_slices_per_s, finished, ..."""
+        if self._format == "hdf5":
+            volume_file.update_record(self._file, entries)
 
     def close(self) -> None:
         if self._format == "hdf5":
+            for block, (data, _filled) in sorted(self._blocks.items()):   # blocks never completed (a stopped run)
+                start = block * self._depth
+                self._dataset[start:start + data.shape[0]] = data
+            self._blocks.clear()
             self._file.close()
 
     def __enter__(self) -> "StreamingVolumeWriter":

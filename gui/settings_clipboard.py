@@ -44,6 +44,7 @@ COPYABLE_SETTINGS: dict[str, list[tuple[str, str]]] = {
         ("reconstruction_backend", "Algorithm"),
         ("device", "Device"),
         ("reconstruction_options", "Algorithm options (e.g. iterations)"),
+        ("reconstruction_filter", "Reconstruction filter"),
     ],
     "Refinements": [
         ("projections_normalized", "Projections already flat/dark corrected"),
@@ -53,6 +54,18 @@ COPYABLE_SETTINGS: dict[str, list[tuple[str, str]]] = {
         ("zinger_removal", "Zinger removal (on/off)"),
         ("zinger_threshold", "Zinger threshold"),
         ("zinger_size", "Zinger size"),
+    ],
+    "Phase retrieval": [
+        ("phase_retrieval", "Phase retrieval (on/off)"),
+        ("phase_method", "Phase method"),
+        ("phase_delta_beta", "delta/beta"),
+        ("phase_distance_mm", "Propagation distance"),
+        ("phase_energy_kev", "Energy"),
+        ("phase_pixel_um", "Pixel size for phase retrieval"),
+    ],
+    "Beam hardening": [
+        ("beam_hardening", "Beam hardening correction (on/off)"),
+        ("bh_coefficients", "Beam hardening coefficients"),
     ],
     "Postprocess": [
         ("dtype", "Output dtype"),
