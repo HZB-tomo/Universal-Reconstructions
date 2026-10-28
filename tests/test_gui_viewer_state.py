@@ -28,12 +28,12 @@ def viewer(app):
 
 
 def _ranges(v):
-    return [tuple(round(float(x), 3) for x in r) for r in v._view.view.viewRange()]
+    return [tuple(round(float(x), 3) for x in r) for r in v.canvas.view.viewRange()]
 
 
 def test_zoom_survives_a_preview_of_the_same_shape(viewer, app):
     viewer.show_image(np.random.rand(40, 40).astype("float32"))
-    viewer._view.view.setRange(xRange=(5, 20), yRange=(5, 20), padding=0)
+    viewer.canvas.view.setRange(xRange=(5, 20), yRange=(5, 20), padding=0)
     app.processEvents()
     zoomed = _ranges(viewer)
     viewer.show_image(np.random.rand(40, 40).astype("float32"))
@@ -43,7 +43,7 @@ def test_zoom_survives_a_preview_of_the_same_shape(viewer, app):
 
 def test_a_preview_of_a_different_shape_resets_the_view(viewer, app):
     viewer.show_image(np.random.rand(40, 40).astype("float32"))
-    viewer._view.view.setRange(xRange=(5, 20), yRange=(5, 20), padding=0)
+    viewer.canvas.view.setRange(xRange=(5, 20), yRange=(5, 20), padding=0)
     zoomed = _ranges(viewer)
     viewer.show_image(np.random.rand(80, 90).astype("float32"))
     app.processEvents()
@@ -55,7 +55,7 @@ def test_view_state_roundtrip_restores_axis_slice_and_zoom(viewer, app):
     viewer.show_stack(volume)
     viewer._axis_buttons[1].click()
     viewer._frame_slider.setValue(12)
-    viewer._view.view.setRange(xRange=(2, 30), yRange=(1, 8), padding=0)
+    viewer.canvas.view.setRange(xRange=(2, 30), yRange=(1, 8), padding=0)
     app.processEvents()
     state = viewer.view_state()
     assert state["axis"] == 1 and state["index"] == 12

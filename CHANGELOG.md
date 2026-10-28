@@ -28,6 +28,10 @@ so everything built before this point is counted as 0.1.x.
   GUI); algorithms with missing packages are listed greyed out with an install hint.
 - GUI: reconstruct-all dialog with streaming to HDF5, progress and speed,
   slicing viewer (x/y/z, sinograms), COR search, metadata-aware import menu.
+- Image viewer rebuilt as the reusable `imageviewer` package (doc/IMAGEVIEWER.md): a new histogram panel docked
+  under the image (whole image or visible area, log counts, Auto with clip, Min-Max, Scale to view, Lock, black/white
+  point boxes, colormaps); a dockable toolbar with a line tool showing length and angle; K opens a live line profile.
+  The old built-in histogram on the right is gone.
 - Metadata toolbox (Tools > Metadata toolbox): every metadata field of the selected project,
   grouped by tier, with its value, status (read from the file, set by you, default, derived,
   calculated, missing) and what to do about a missing one.

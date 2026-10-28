@@ -41,6 +41,19 @@ class MainWindow(QMainWindow):
         self.viewer = ImageViewer(self)
         self.setCentralWidget(self.viewer)
 
+        # The viewer's own pieces, each in its own dockable home: the drawing tools on top, the
+        # histogram under the image. Both can be dragged elsewhere, floated, or closed (View menu).
+        self.tools_toolbar = self.viewer.make_toolbar("Image tools")
+        self.addToolBar(Qt.TopToolBarArea, self.tools_toolbar)
+        self.histogram_panel = self.viewer.make_histogram()
+        self.histogram_dock = QDockWidget("Histogram", self)
+        self.histogram_dock.setObjectName("histogram_dock")
+        self.histogram_dock.setWidget(self.histogram_panel)
+        self.histogram_dock.setFeatures(
+            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable
+        )
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.histogram_dock)
+
         # Output folders chosen this session, shared so a later action
         # (e.g. one path for all selected projects) can reuse them.
         self.paths = RememberedPaths()
@@ -107,6 +120,16 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self.statusBar().showMessage("Ready")
 
+    def _set_pixel_size(self, session) -> None:
+        """Tell the viewer how big a pixel is, so the line tool can also measure in um -- but only when
+        the size is real, not the silent 1.0 um default."""
+        size = None
+        if session.imported:
+            spec = session.run.project.metadata.get_field("voxel_size")
+            if spec is not None and not spec.is_missing and spec.source in ("file", "user", "derived"):
+                size = spec.value
+        self.viewer.set_pixel_size(size, "um")
+
     def _on_current_session(self, session) -> None:
         if session is not None:
             self.metadata_toolbox.show_session(session)
@@ -129,6 +152,10 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("File")
         file_menu.addAction("Import...", lambda: self._import(storage_mode="disk"))
         file_menu.addAction("Import to RAM...", lambda: self._import(storage_mode="ram"))
+
+        view_menu = self.menuBar().addMenu("View")
+        view_menu.addAction(self.histogram_dock.toggleViewAction())
+        view_menu.addAction(self.tools_toolbar.toggleViewAction())
 
         # Standalone tools. Each opens its own window; none of it shares
         # state with the main app beyond the files it's given.
@@ -432,12 +459,14 @@ class MainWindow(QMainWindow):
         self._shown = (session, "projections")
         self.adjustment_panel.set_session(session)
         self.metadata_toolbox.show_session(session)
+        self._set_pixel_size(session)
         self._show_status(f"opened {session.project_id}")
 
     def _show_reconstruction(self, session: ProjectSession) -> None:
         """Shows the project's full reconstruction (in-memory or from its
         HDF5 file) in the viewer instead of its projections."""
         self._remember_view()
+        self._set_pixel_size(session)
         if session.ram_volume is not None:
             self.viewer.show_stack(session.ram_volume)
         elif session.volume_path is not None:

@@ -75,7 +75,7 @@ version = { attr = "core.version.__version__" }
 
 [tool.setuptools]
 packages = [
-    "core", "data_import", "data_import.vendors",
+    "core", "data_import", "data_import.vendors", "imageviewer",
     "completion", "preprocessing",
     "calibration", "calibration.backends",
     "reconstruction", "reconstruction.backends",

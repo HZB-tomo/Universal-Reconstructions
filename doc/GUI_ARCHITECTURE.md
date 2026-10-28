@@ -15,7 +15,7 @@ gui/
   import_dialog.py       ImportDialog
   project_panel.py       ProjectPanel
   adjustment_panel.py     AdjustmentPanel and its four tabs
-  viewer.py              ImageViewer
+  viewer.py              ImageViewer: imageviewer.StackViewer + the crop rectangle
   metadata_toolbox.py    MetadataToolbox (dock widget); metadata_info.py is its Qt-free model
   session.py             ProjectSession, unique_project_id()
   workers.py             Worker, run_in_background()
@@ -25,7 +25,10 @@ gui/
 
 `MainWindow` is a `QMainWindow`: two `QDockWidget`s (Projects, left;
 Adjustment, right), movable/floatable but not closable; `ImageViewer`
-is the central widget. Menu bar (`File`, `Tools`) and status bar.
+is the central widget, with the image tools in a toolbar on top and the
+histogram in a dock below it (both movable, floatable and closable, brought
+back through the `View` menu). Menu bar (`File`, `View`, `Tools`) and status bar.
+The viewer itself is the reusable [`imageviewer` package](./IMAGEVIEWER.md).
 Tools > Convert TIFF project to HDF5... opens `ConvertDialog`
 (`gui/convert_dialog.py`); see [`CONVERTER.md`](./CONVERTER.md).
 Tools > Metadata toolbox shows or hides a third dock (see below), which, unlike the
