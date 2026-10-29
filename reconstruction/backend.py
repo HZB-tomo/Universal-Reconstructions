@@ -160,9 +160,16 @@ def get_backend(name: str) -> ReconstructionBackend:
 # Order of the algorithm list in the GUI: the general-purpose analytic methods first,
 # then the rest of the built-ins; backends not named here (yours) follow alphabetically.
 _DISPLAY_ORDER = (
-    "algotom_fbp", "gridrec", "algotom_bpf", "algotom_dfi", "algotom_bp",
-    "algotom_sirt", "algotom_sart", "algotom_art", "algotom_cgls", "algotom_gridrec", "rtk_fdk",
+    "gridrec", "algotom_fbp", "algotom_bpf", "algotom_dfi", "algotom_bp",
+    "algotom_sirt", "algotom_sart", "algotom_art", "algotom_cgls", "algotom_gridrec",
+    "astra_fdk", "rtk_fdk",
 )
+
+# What a project is reconstructed with when nobody chose: per geometry, the first of these that is usable here.
+DEFAULT_BACKENDS = {
+    "parallel": ("gridrec", "algotom_fbp"),     # the fast Fourier-gridding reconstruction; filtered backprojection if it is missing
+    "cone": ("astra_fdk", "rtk_fdk"),           # FDK on the GPU; on the CPU if there is no GPU or no ASTRA
+}
 
 
 def list_backends(available_only: bool = True, geometry: Optional[str] = None) -> list:
@@ -175,6 +182,20 @@ def list_backends(available_only: bool = True, geometry: Optional[str] = None) -
     ]
     known = [n for n in _DISPLAY_ORDER if n in names]
     return known + sorted(n for n in names if n not in _DISPLAY_ORDER)
+
+
+def default_backend(geometry_type: Optional[str] = None) -> Optional[str]:
+    """
+    The backend to use for `geometry_type` ("parallel" / "cone"; None means parallel) when none was chosen:
+    the first of DEFAULT_BACKENDS[geometry_type] that is usable (its packages are installed, and for
+    astra_fdk a GPU is present), else the first usable backend that supports the geometry, else None.
+    """
+    geometry_type = geometry_type or "parallel"
+    usable = list_backends(geometry=geometry_type)
+    for name in DEFAULT_BACKENDS.get(geometry_type, ()):
+        if name in usable:
+            return name
+    return usable[0] if usable else None
 
 
 def clear_registry():

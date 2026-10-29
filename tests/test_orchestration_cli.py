@@ -45,7 +45,7 @@ def test_init_config_writes_a_loadable_single_project_template(tmp_path, capsys)
     assert code == 0
     assert out.exists()
     config = load_config(out)
-    assert config.reconstruction_backend == "algotom_fbp"
+    assert config.reconstruction_backend is None            # blank in the template: the default for the geometry
     assert "wrote" in capsys.readouterr().out
 
 

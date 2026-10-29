@@ -21,7 +21,13 @@ so everything built before this point is counted as 0.1.x.
   the software versions; `reconstruction.volume_file.read_volume_info()` reads them.
 - `core/version.py` (`__version__`), `tomo --version`; the software version is
   recorded in the files it writes.
-- Cone-beam FDK reconstruction (`rtk_fdk`, CPU, via RTK); Paganin phase
+- Default algorithms: `gridrec` for parallel beam and `astra_fdk` (GPU) for cone beam (`rtk_fdk` and `algotom_fbp`
+  when those are not usable); `ProjectConfig.reconstruction_backend` is now unset by default and settled by the
+  pipeline from the geometry, so a cone-beam project needs no backend named. The one-slice preview uses them too.
+- Center-of-rotation scan: a curve of a chosen metric (sinogram symmetry, 0/180 pairs, sharpness, entropy, total
+  variation, negativity, std) over a chosen range and number of trial centers, a slider that previews the slice at
+  each stop, in both geometries; cone beam previews the central plane.
+- Cone-beam FDK reconstruction (`rtk_fdk`, CPU, via RTK; `astra_fdk`, GPU, via ASTRA); Paganin phase
   retrieval; beam-hardening correction; gridrec backend (`urct_gridrec` wheel,
   CPU and GPU); race-free CPU backprojection and one-slice-per-launch GPU FBP.
 - Reconstruction filter choice (`filter` in the INI file, a Filter box in the

@@ -51,11 +51,13 @@ class ProjectSession:
     # "reconstruction"): slicing direction, slice number, zoom. See
     # ImageViewer.view_state() and MainWindow._remember_view().
     view_states: dict = field(default_factory=dict)
-    # Center-of-rotation search settings and its last result (Automatic
-    # adjustments tab): None means "auto"; candidates are (center, score).
-    cor_guess: Optional[float] = None
-    cor_tolerance: Optional[float] = None
-    cor_candidates: list = field(default_factory=list)
+    # Center-of-rotation scan (Automatic adjustments tab): the metric, the range of trial centers as shifts
+    # from the detector middle, how many points, and the last scan (a calibration.CenterScan). None = defaults.
+    cor_metric: Optional[str] = None
+    cor_range: Optional[tuple] = None
+    cor_points: Optional[int] = None
+    cor_range_user: bool = False      # the range was typed by the person: the quick estimate then searches it
+    cor_scan: Optional[object] = None
 
     @property
     def project_id(self) -> str:

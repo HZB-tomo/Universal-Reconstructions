@@ -143,9 +143,15 @@ def test_exactly_reproducible_and_input_untouched(small):
     stack = np.stack([line, line * 0.8], axis=1).copy()
     stack[3, 0, 5] = 0.0
     before = stack.copy()
-    a = gridrec(stack, angles, 15.5)
-    b = gridrec(stack, angles, 15.5)
+    a = gridrec(stack, angles, 15.5, device="cpu")
+    b = gridrec(stack, angles, 15.5, device="cpu")
     np.testing.assert_array_equal(a, b)           # race-free gridding: bit-for-bit repeatable
+    np.testing.assert_array_equal(stack, before)
+    # The GPU gridding adds into the grid with float32 atomics, whose order varies run to run:
+    # repeatable to rounding only.
+    c = gridrec(stack, angles, 15.5)
+    d = gridrec(stack, angles, 15.5)
+    np.testing.assert_allclose(c, d, atol=1e-5 * np.abs(c).max())
     np.testing.assert_array_equal(stack, before)
 
 

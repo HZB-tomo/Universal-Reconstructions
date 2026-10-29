@@ -295,8 +295,10 @@ back to parallel restores the usual list. "Reconstruct (slice)" is not available
 
 The reconstruction-algorithm combo is built from the backend registry
 (`reconstruction.list_backends(geometry=...)`): every registered backend that supports the project's geometry and whose
-required packages are installed, in a fixed order (`algotom_fbp`,
-`gridrec`, `algotom_bpf`, ...) with any others alphabetically after.
+required packages are installed, in a fixed order (`gridrec`,
+`algotom_fbp`, `algotom_bpf`, ..., then `astra_fdk`, `rtk_fdk`) with any others alphabetically after. A project
+with no algorithm chosen, or whose chosen one does not support its geometry, gets the default for the geometry:
+`gridrec` for parallel beam, `astra_fdk` (GPU) for cone beam.
 `algotom_gridrec` (needs conda-only tomopy) and the ASTRA backends
 (need `astra-toolbox`) therefore only appear when those are installed,
 and a backend someone adds shows up with no change here. An "Iterations" spin box
@@ -324,22 +326,50 @@ image-domain-fallback split.
 
 ### Automatic adjustments
 
-**Find center of rotation** searches the middle row. Fully automatic by
-default; type a **Guess** (or "Use current center") and a **Search +/-**
-tolerance to search only that window (a guess alone means +/- a tenth of the
-width). The best few candidates are listed ("match 1.00" is the winner; a
-second one near 1.0 means the answer is ambiguous): click one to use and
-preview it. If the best match sits at the edge of the window, the message and
-the note under the list say the true center may lie outside it. Guess,
-tolerance and candidates are kept per project.
-(`calibration.search_center()`, see CALIBRATION.md.)
+**Scan centers** (`gui/center_tab.py`) evaluates one *metric* at a grid of trial centers on the preview
+slice and draws the curve, instead of listing a few candidates:
+
+- **Auto-find center**: the quick one-click estimate, no settings. Vo's search over a tenth of the width
+  either side of the detector's middle (a real center is within a few percent), or over your **Range** if you
+  have typed one; coarse over every column of the window, then only the winner refined to 0.25 px (refining is most of the cost on a large detector). One calculation: the plot is
+  the curve the search itself evaluated, nothing is computed again, so a rival peak in the window is visible.
+  If the best sits at the window's edge, a note says so: type a wider Range and press Auto again. It applies the search's refined answer, shows the window in the range boxes, and from there
+  everything below (zoom, another metric, the slider) works on it.
+- **Metric**: how a trial center is scored (`calibration/metrics.py`, see CALIBRATION.md). The *fast* ones look
+  only at the projections of the row (sinogram symmetry after Vo, and 0/180 projection pairs); the ones marked
+  *reconstructs each* reconstruct the slice at every trial and score the picture (sharpness, entropy, total
+  variation, negativity, standard deviation). The tooltips say what each does; sharpness and entropy were the
+  most reliable on noisy data, total variation and negativity the least. Every geometry offers all of them; for
+  cone beam the slice is the central plane (exact), and the sinogram metrics, which assume parallel rays, are
+  flagged as approximate there.
+- **Range, Points, Axis**: the first and last trial center and how many trials there are (evenly spread), as a
+  shift from the middle of the detector or as detector columns. The panel shows the step and warns when it is
+  coarser than 0.5 px. The default range is an eighth of the detector width either side of the middle, 101
+  points. Metric, range and points are kept per project.
+- **Plot**: quality against center (1 = best, whichever way the metric points; the green dot is the best, refined
+  below the grid step). The yellow line is the current center: drag it, click the plot, or use the **slider**
+  under it to move the center of rotation along the curve; the preview slice in the viewer follows, and Basic
+  settings' center follows too. A scan runs in the background (the button turns into **Cancel scan**, with a
+  progress bar); when it is done the best center is applied and previewed.
+- **Zoom in on best** scans again over a tenth of the range around the best; **Range around current** moves the
+  range onto the current center; **Go to best** returns to the best of the last scan.
+- Messages: the best is at the edge of the range (widen it), a second peak scores almost as well (look at the
+  picture), the offset is larger than usual, or the metric is approximate for this geometry.
+
+While a slice metric scans, every picture it reconstructs is remembered by `PreviewEngine`, so dragging the slider
+afterwards is instant. Dragging to a center that has not been computed reconstructs after a 40 ms pause; if the
+last preview took longer than 0.3 s, the picture is only computed when the slider is released.
+
+For **cone beam** the preview slice (and so the scan) is the *central plane*, the one through the source: its rays
+stay in it, so the middle detector row (the mean of the two middle rows for an even count) reconstructs it
+exactly with FDK (`size_z=1`). That is also what **Reconstruct (slice)** shows for cone data.
 
 **Auto-update preview** (Basic settings, under Center of rotation): every
-change of the center (mouse wheel, typing, a candidate) re-previews the slice
+change of the center (mouse wheel, typing, the scan slider) re-previews the slice
 after a 120 ms pause. `PreviewEngine` (`gui/preview_engine.py`) remembers the
 normalized sinogram of the slice and every preview image (LRU, 512 MB), so a
 center already tried shows instantly, and with auto-update on the centers 3
-wheel-steps either side (and the other candidates after a search) are computed
+wheel-steps either side are computed
 in the background. A change while a preview is computing is answered with the
 latest center when it finishes. One wheel notch is 0.5 px.
 

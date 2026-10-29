@@ -93,6 +93,9 @@ class AlgotomCorBackend(CalibrationBackend):
             dtype=float,
         )
 
+        # What it evaluated, in detector columns: the caller may plot it (search_center() passes it on).
+        self.last_curve = (positions * dsp_col + 0.5 * (dsp_col - 1), metrics)
+
         # Local minima of the coarse curve (a window edge counts: the true
         # minimum may lie beyond it), kept at least `min_sep` apart, best first.
         left = np.r_[np.inf, metrics[:-1]]

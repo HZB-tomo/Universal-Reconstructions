@@ -77,6 +77,9 @@ class CenterSearch:
     at_edge: True if the winning minimum sat at the edge of the window,
         i.e. the true center may lie outside it -- widen the tolerance
         or change the guess.
+    curve: (centers, metric values) the backend evaluated on the way, lower = better, or None when it
+        does not keep them (the algotom backend does: every column of the window, at one pixel spacing
+        for a detector up to 1000 wide).
     """
 
     best: float
@@ -84,6 +87,7 @@ class CenterSearch:
     start: float
     stop: float
     at_edge: bool
+    curve: Optional[tuple] = None
 
 
 def search_window(
@@ -143,7 +147,8 @@ def search_center(
     ]
     best = candidates[0].center
     at_edge = bool(getattr(backend_instance, "last_search_at_edge", False)) or abs(best - lo) < 1.0 or abs(best - hi) < 1.0
-    return CenterSearch(best=best, candidates=candidates, start=lo, stop=hi, at_edge=at_edge)
+    curve = getattr(backend_instance, "last_curve", None)
+    return CenterSearch(best=best, candidates=candidates, start=lo, stop=hi, at_edge=at_edge, curve=curve)
 
 
 def half_scan_slice(angles, tolerance: float = 1.0) -> slice:

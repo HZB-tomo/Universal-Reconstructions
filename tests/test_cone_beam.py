@@ -4,7 +4,6 @@ import sys
 import h5py
 import numpy as np
 import pytest
-from scipy import ndimage as ndi
 
 from orchestration import PipelineRun, PipelineStageError, ProjectConfig
 from orchestration.geometry import geometry_from_project
@@ -12,38 +11,9 @@ from reconstruction import Geometry, get_backend, list_backends, reconstruct, re
 
 pytest.importorskip("itk")
 
-SOD, SDD, PIXEL_MM = 150.0, 300.0, 1.0
-ROWS, COLS, N_ANGLES = 48, 64, 120
-AXIS_COLUMN = (COLS - 1) / 2.0 + 2.0              # the rotation axis projects 2 pixels off the detector middle
-SPHERES = [                                      # x, y, z (mm; z along the rotation axis), radius, mu (1/mm)
-    (10.0, -5.0, 7.5, 4.0, 0.05),
-    (-12.0, 6.0, -2.5, 2.5, 0.08),
-]
-CONE = Geometry(geometry_type="cone", source_to_detector_distance=SDD, source_to_object_distance=SOD,
-                detector_pixel_size=PIXEL_MM * 1000.0)
-
-
-def analytic_projections(axis_column=AXIS_COLUMN):
-    """Line integrals of the spheres for the circular cone-beam scan described in rtk_fdk's docstring:
-    detector axis u = (cos t, -sin t), ray r = (sin t, cos t), source at -SOD * r."""
-    cc, rr = np.meshgrid(np.arange(COLS), np.arange(ROWS))
-    zhat = np.array([0.0, 0.0, 1.0])
-    out = np.empty((N_ANGLES, ROWS, COLS), dtype=np.float32)
-    for k, theta in enumerate(np.radians(np.arange(N_ANGLES) * 360.0 / N_ANGLES)):
-        u = np.array([np.cos(theta), -np.sin(theta), 0.0])
-        r = np.array([np.sin(theta), np.cos(theta), 0.0])
-        source = -SOD * r
-        detector_centre = (SDD - SOD) * r
-        point = (detector_centre[None, None, :] + ((cc - axis_column) * PIXEL_MM)[..., None] * u
-                 + ((rr - (ROWS - 1) / 2) * PIXEL_MM)[..., None] * zhat)
-        ray = point - source
-        length = np.linalg.norm(ray, axis=-1)
-        total = np.zeros((ROWS, COLS))
-        for x0, y0, z0, radius, mu in SPHERES:
-            d = np.linalg.norm(np.cross((np.array([x0, y0, z0]) - source)[None, None, :], ray), axis=-1) / length
-            total += mu * 2 * np.sqrt(np.clip(radius ** 2 - d ** 2, 0, None))
-        out[k] = total
-    return out
+from tests.fixtures.cone_phantom import (  # noqa: E402
+    AXIS_COLUMN, CENTRAL_SPHERES, CONE, COLS, N_ANGLES, PIXEL_MM, ROWS, SDD, SOD, SPHERES, analytic_projections, blobs, voxel_size_mm,
+)
 
 
 @pytest.fixture(scope="module")
@@ -54,31 +24,10 @@ def phantom():
     return transmission, angles, volume
 
 
-def voxel_size_mm():
-    return PIXEL_MM * SOD / SDD
-
-
-def blobs(volume, threshold_fraction=0.4):
-    """Centroids, in mm in the scan's (x, y, z) frame, of the connected blobs above a threshold."""
-    labelled, count = ndi.label(volume > threshold_fraction * volume.max())
-    found = []
-    for label in range(1, count + 1):
-        mask = labelled == label
-        if mask.sum() < 20:
-            continue
-        index = np.argwhere(mask)
-        weight = volume[mask]
-        iz, iy, ix = (index * weight[:, None]).sum(0) / weight.sum()
-        vox = voxel_size_mm()
-        nz, ny, nx = volume.shape
-        found.append(((ix - (nx - 1) / 2) * vox, (iy - (ny - 1) / 2) * vox, (iz - (nz - 1) / 2) * vox, int(mask.sum())))
-    return sorted(found, key=lambda b: -b[3])
-
-
 def test_backend_is_registered_for_cone_beam_only():
     backend = get_backend("rtk_fdk")
     assert backend.supported_geometries == {"cone"} and backend.is_available()
-    assert list_backends(geometry="cone") == ["rtk_fdk"]
+    assert "rtk_fdk" in list_backends(geometry="cone")
     assert "rtk_fdk" not in list_backends(geometry="parallel")
     assert resolve_device("rtk_fdk", "gpu") == "cpu"          # the CPU implementation; says so honestly
 
@@ -241,10 +190,44 @@ def test_the_pipeline_refuses_what_cone_beam_cannot_do(cone_scan):
     assert not result.success and "streaming" in str(result.error)
 
 
-def test_single_slice_previews_say_why_they_are_unavailable(cone_scan):
+@pytest.fixture(scope="module")
+def central():
+    """A scan whose spheres lie on the plane through the source: transmission, angles and the full volume."""
+    angles = np.arange(N_ANGLES) * 360.0 / N_ANGLES
+    transmission = np.exp(-analytic_projections(spheres=CENTRAL_SPHERES)).astype(np.float32)
+    return transmission, angles, reconstruct(transmission, angles, AXIS_COLUMN, geometry=CONE, backend="rtk_fdk")
+
+
+def test_the_central_plane_can_be_previewed_on_its_own(central, tmp_path):
+    """The plane through the source needs only the middle detector row(s): the preview must equal the middle of the full volume."""
     from gui.preview_engine import PreviewEngine
 
-    run, config = _imported(cone_scan)
-    with pytest.raises(ValueError, match="Reconstruct all slices"):
-        PreviewEngine().compute(run.project, config, 10, AXIS_COLUMN)
-    run.project.close()
+    transmission, angles, volume = central
+    path = tmp_path / "central.h5"
+    with h5py.File(path, "w") as f:
+        f.attrs["beamline"] = "generic_parallel_synchrotron"
+        f.create_dataset("/entry/instrument/detector/data", data=transmission)
+        f.create_dataset("/entry/instrument/detector/flat_fields", data=np.ones((2, ROWS, COLS), dtype=np.float32))
+        f.create_dataset("/entry/instrument/detector/dark_fields", data=np.zeros((2, ROWS, COLS), dtype=np.float32))
+        f.create_dataset("/entry/instrument/sample/rotation_angle", data=angles)
+        f.create_dataset("/entry/instrument/detector/pixel_size", data=voxel_size_mm() * 1000.0)
+    run, config = _imported(path)
+    try:
+        engine = PreviewEngine()
+        image = engine.compute(run.project, config, 10, AXIS_COLUMN)
+        assert image.shape == (COLS, COLS)
+        middle = volume[ROWS // 2 - 1:ROWS // 2 + 1].mean(axis=0)       # 48 rows: the plane lies between slices 23 and 24
+        assert np.linalg.norm(image - middle) / np.linalg.norm(middle) < 0.05
+        assert engine.compute(run.project, config, 30, AXIS_COLUMN) is image          # whatever the row: it is the central plane
+        assert engine.reconstructions == 1
+    finally:
+        run.project.close()
+
+
+def test_one_detector_row_reconstructs_the_slice_at_the_height_of_the_source(central):
+    transmission, angles, volume = central
+    row = transmission[:, ROWS // 2:ROWS // 2 + 1, :]        # a single row (half a pixel off the plane)
+    one = reconstruct(row, angles, AXIS_COLUMN, geometry=CONE, backend="rtk_fdk")
+    assert one.shape == (1, COLS, COLS)
+    reference = volume[ROWS // 2 - 1:ROWS // 2 + 1].mean(axis=0)
+    assert np.linalg.norm(one[0] - reference) / np.linalg.norm(reference) < 0.1

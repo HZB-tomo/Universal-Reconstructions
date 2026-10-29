@@ -290,6 +290,9 @@ Turns normalized sinograms into reconstructed images. Does not take a
   convention.
 - `backends/rtk_fdk.py`: cone-beam FDK on the CPU through the Reconstruction Toolkit (`itk-rtk`, the
   `cone` extra); takes the whole projection stack. See [`CONE_BEAM.md`](./CONE_BEAM.md).
+- `backends/astra_fdk.py`: the same cone-beam FDK on the GPU through ASTRA's `FDK_CUDA` (`astra-toolbox`,
+  the `reconstruction_extra` extra); listed as unavailable on a machine with no CUDA device.
+  Shared geometry checks live in `backends/_cone_common.py`.
   `orchestration/geometry.py` builds the `Geometry` for every run, including the cone-beam detector pitch.
 - `backends/gridrec.py`: a thin wrapper over the separate `urct_gridrec`
   package (`gridrec_project/`), the project's own fast gridrec; optional,

@@ -44,6 +44,7 @@ from typing import Optional
 import numpy as np
 
 from reconstruction.backend import Geometry, ReconstructionBackend, register_backend
+from reconstruction.backends._cone_common import cone_parameters, line_integrals as _line_integrals, output_size
 
 _FILTERS = ("hann", "ramp", "shepp-logan", "cosine")
 _INSTALL_HINT = (
@@ -90,35 +91,18 @@ class RtkFdkBackend(ReconstructionBackend):
             raise TypeError(f"rtk_fdk got unexpected options {sorted(options)}")
         if filter_name not in _FILTERS:
             raise ValueError(f"unknown filter {filter_name!r}; choose from {_FILTERS}")
-        sdd, sod, pixel_um = (
-            geometry.source_to_detector_distance, geometry.source_to_object_distance, geometry.detector_pixel_size,
-        )
-        missing = [name for name, value in (
-            ("source_to_detector_distance", sdd), ("source_to_object_distance", sod), ("detector_pixel_size", pixel_um),
-        ) if not value]
-        if missing:
-            raise ValueError(f"cone-beam reconstruction needs {', '.join(missing)}")
-        if not float(sdd) > float(sod) > 0:
-            raise ValueError(f"need source_to_detector_distance ({sdd}) > source_to_object_distance ({sod}) > 0")
-
-        centers = np.atleast_1d(np.asarray(center, dtype=np.float64))
-        if np.ptp(centers) > 1e-6:
-            raise ValueError("cone-beam reconstruction takes one center of rotation; a per-slice (tilt) correction is not supported")
+        sdd, sod, pixel_mm, voxel_mm, axis_column = cone_parameters(geometry, center)
 
         itk, rtk = _rtk()
         data = np.asarray(sinograms)
         n_angles, n_rows, n_cols = data.shape
-        # attenuation: -log of transmission (values <= 0 count as 1, like the other backends)
-        transmission = np.array(data, dtype=np.float32)
-        transmission[transmission <= 0.0] = 1.0
-        line_integrals = np.ascontiguousarray(-np.log(transmission), dtype=np.float32)
-
-        pixel_mm = float(pixel_um) / 1000.0
-        magnification = float(sdd) / float(sod)
-        voxel_mm = pixel_mm / magnification
-        n_xy = int(size_xy or n_cols)
-        n_z = int(size_z or n_rows)
-        axis_column = float(centers[0])
+        line_integrals = _line_integrals(data)
+        n_xy, n_z = output_size(n_rows, n_cols, size_xy, size_z)
+        if n_rows == 1 and n_z == 1:
+            # RTK's filters cannot take a one-row detector. A slice at the height of the source only ever
+            # reads the middle row, so give it three copies and the same answer.
+            line_integrals = np.ascontiguousarray(np.repeat(line_integrals, 3, axis=1))
+            n_rows = 3
 
         ImageType = itk.Image[itk.F, 3]
         projections = itk.image_from_array(line_integrals)           # numpy (angle, row, column) = ITK (x=column, y=row, z=angle)

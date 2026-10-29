@@ -15,6 +15,7 @@ from typing import Optional
 import numpy as np
 import copy
 import threading
+import time
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -27,8 +28,6 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -37,13 +36,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from calibration import find_tilt, half_scan_slice, search_center
+from calibration import ScanCancelled, center_grid, find_tilt, get_metric, half_scan_slice, image_center
 from core.data_interface import DataInterface
 from orchestration import PipelineRun, ProgressEvent, load_config, save_config
-from preprocessing import build_reference, list_phase_methods, normalize_slice
-from reconstruction import get_backend, list_backends, resolve_device, to_uint16
+from preprocessing import list_phase_methods
+from reconstruction import default_backend, get_backend, list_backends, resolve_device, to_uint16
 
 from orchestration import ram_check
+from gui.center_tab import DEFAULT_POINTS, AutomaticAdjustmentsTab
 from gui.bh_info import DEFAULT_COEFFICIENTS, padded, summarize_beam_hardening
 from gui.phase_info import LABELS as PHASE_LABELS
 from gui.phase_info import ORIGIN_TEXT as PHASE_ORIGIN_TEXT
@@ -53,7 +53,7 @@ from gui.reconstruct_dialog import ReconstructDestinationDialog
 from gui.reconstruct_plan import RememberedPaths, describe_error, describe_run, make_plan, rows_for_export, streaming_config
 from gui.session import ProjectSession
 from gui.viewer import ImageViewer
-from gui.workers import ProgressRelay, run_in_background
+from gui.workers import ProgressRelay, ScanRelay, run_in_background
 
 # Sanity bounds, not hard limits: a real center of rotation is within
 # about 1-2% of the detector width from the image's geometric center,
@@ -405,109 +405,6 @@ class BasicSettingsTab(QWidget):
         widget.blockSignals(True)
         fn()
         widget.blockSignals(False)
-
-
-class AutomaticAdjustmentsTab(QWidget):
-    """
-    Center-of-rotation search and tilt. The search can run fully automatic,
-    or be steered with a guess and a tolerance (search window = guess +/-
-    tolerance); it always lists the best few candidates, so when the first
-    answer is wrong the next ones are one click away.
-    """
-
-    find_cor_requested = Signal(object, object)  # guess (float | None), tolerance (float | None)
-    candidate_chosen = Signal(float)
-    use_current_center_requested = Signal()
-    find_tilt_requested = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-
-        # "auto" is the special value at the minimum: no guess / no tolerance.
-        self.guess_spin = QDoubleSpinBox(self)
-        self.guess_spin.setRange(-1.0, 100000.0)
-        self.guess_spin.setDecimals(1)
-        self.guess_spin.setSpecialValueText("auto")
-        self.guess_spin.setValue(-1.0)
-        self.guess_spin.setToolTip(
-            "Where you think the center of rotation is, in detector columns. 'auto' searches the middle "
-            "half of the detector. Use the arrows or type a value to set a guess."
-        )
-
-        self.tolerance_spin = QDoubleSpinBox(self)
-        self.tolerance_spin.setRange(0.0, 100000.0)
-        self.tolerance_spin.setDecimals(1)
-        self.tolerance_spin.setSuffix(" px")
-        self.tolerance_spin.setSpecialValueText("auto")
-        self.tolerance_spin.setToolTip(
-            "How far from the guess to look (+/-). 'auto' is a tenth of the detector width around a guess."
-        )
-
-        use_current_btn = QPushButton("Use current center", self)
-        use_current_btn.setToolTip("Copy the center of rotation currently set in Basic settings into the guess.")
-        use_current_btn.clicked.connect(self.use_current_center_requested)
-
-        self.find_cor_btn = QPushButton("Find center of rotation", self)
-        self.find_cor_btn.clicked.connect(self._emit_find_cor)
-
-        self.candidates_list = QListWidget(self)
-        self.candidates_list.setMaximumHeight(110)
-        self.candidates_list.setToolTip("Click a candidate to use it and preview it.")
-        self.candidates_list.itemClicked.connect(self._on_candidate_clicked)
-        self.search_note = QLabel("", self)
-        self.search_note.setWordWrap(True)
-
-        find_tilt_btn = QPushButton("Find tilt", self)
-        find_tilt_btn.clicked.connect(self.find_tilt_requested)
-
-        form = QFormLayout()
-        form.addRow("Guess", self.guess_spin)
-        form.addRow("Search +/-", self.tolerance_spin)
-
-        layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(use_current_btn)
-        layout.addWidget(self.find_cor_btn)
-        layout.addWidget(QLabel("Candidates (best first):", self))
-        layout.addWidget(self.candidates_list)
-        layout.addWidget(self.search_note)
-        layout.addSpacing(12)
-        layout.addWidget(find_tilt_btn)
-        layout.addStretch()
-
-    def guess(self) -> Optional[float]:
-        return None if self.guess_spin.value() < 0 else self.guess_spin.value()
-
-    def tolerance(self) -> Optional[float]:
-        return None if self.tolerance_spin.value() <= 0 else self.tolerance_spin.value()
-
-    def _emit_find_cor(self) -> None:
-        self.find_cor_requested.emit(self.guess(), self.tolerance())
-
-    def _on_candidate_clicked(self, item: QListWidgetItem) -> None:
-        self.candidate_chosen.emit(float(item.data(Qt.UserRole)))
-
-    def set_guess(self, value: Optional[float]) -> None:
-        self.guess_spin.setValue(-1.0 if value is None else value)
-
-    def set_values(self, guess: Optional[float], tolerance: Optional[float], candidates: list, note: str = "") -> None:
-        for spin, value in ((self.guess_spin, -1.0 if guess is None else guess), (self.tolerance_spin, tolerance or 0.0)):
-            spin.blockSignals(True)
-            spin.setValue(value)
-            spin.blockSignals(False)
-        self.set_candidates(candidates, note)
-
-    def set_candidates(self, candidates: list, note: str = "") -> None:
-        """`candidates`: [(center, score), ...] best first (score NaN = unknown)."""
-        self.candidates_list.clear()
-        for center, score in candidates:
-            label = f"{center:.2f}" if score != score else f"{center:.2f}    match {score:.2f}"
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, float(center))
-            self.candidates_list.addItem(item)
-        if candidates:
-            self.candidates_list.setCurrentRow(0)
-        self.search_note.setText(note)
 
 
 class RefinementsTab(QWidget):
@@ -1078,11 +975,11 @@ class AdjustmentPanel(QWidget):
         self.basic_tab.load_config_requested.connect(self._load_config_file)
         self.basic_tab.export_config_requested.connect(self._export_config)
         self.basic_tab.export_config_as_requested.connect(self._export_config_as)
-        self.auto_tab.find_cor_requested.connect(self._find_cor)
-        self.auto_tab.candidate_chosen.connect(self._on_candidate_chosen)
-        self.auto_tab.use_current_center_requested.connect(self._use_current_center_as_guess)
-        self.auto_tab.guess_spin.valueChanged.connect(self._on_guess_changed)
-        self.auto_tab.tolerance_spin.valueChanged.connect(self._on_tolerance_changed)
+        self.auto_tab.scan_requested.connect(self._scan_center)
+        self.auto_tab.auto_requested.connect(self._auto_find_center)
+        self.auto_tab.scan_cancel_requested.connect(self._cancel_scan)
+        self.auto_tab.center_scrubbed.connect(self._on_center_scrubbed)
+        self.auto_tab.settings_changed.connect(self._on_scan_settings_changed)
         self.basic_tab.auto_update_toggled.connect(self._on_auto_update_toggled)
         self.auto_tab.find_tilt_requested.connect(self._find_tilt)
         self.save_tab.changed.connect(self._on_save_settings_changed)
@@ -1111,6 +1008,15 @@ class AdjustmentPanel(QWidget):
         self._preview_inflight = False
         self._preview_pending = False
         self._prefetch_cancel = threading.Event()
+        self._scan_cancel = threading.Event()
+        self._scan_running = False
+        self._scan_relay = ScanRelay(self)
+        self._scan_relay.progress.connect(self.auto_tab.set_progress)
+        self._last_preview_seconds = 0.0       # how long the last preview took: decides whether scrubbing is live
+        self._scrub_timer = QTimer(self)
+        self._scrub_timer.setSingleShot(True)
+        self._scrub_timer.setInterval(40)
+        self._scrub_timer.timeout.connect(lambda: self._reconstruct(all_slices=False))
         self._auto_update_timer = QTimer(self)
         self._auto_update_timer.setSingleShot(True)
         self._auto_update_timer.setInterval(120)  # lets a burst of wheel notches settle
@@ -1122,6 +1028,7 @@ class AdjustmentPanel(QWidget):
 
     def set_session(self, session: Optional[ProjectSession]) -> None:
         self._prefetch_cancel.set()  # background previews belong to the previous project
+        self._scan_cancel.set()      # ... and so does a running center scan
         self.session = session
         enabled = session is not None
         self.tabs.setEnabled(enabled)
@@ -1173,7 +1080,19 @@ class AdjustmentPanel(QWidget):
         if session.export_rows is None and n_rows:
             session.export_rows = (0, n_rows - 1)  # the full range, same "resolve once, on first knowledge" pattern
 
-        if "num_iter" not in config.reconstruction_options and get_backend(config.reconstruction_backend).is_iterative and n_angles and width:
+        # Only backends that support this project's geometry. Nothing chosen yet, or the chosen one does not
+        # support it (e.g. the geometry was just switched to cone): the default for the geometry (gridrec for
+        # parallel beam, astra_fdk for cone beam, or what is usable here instead).
+        usable = list_backends(geometry=geometry_type or None)
+        listed = list_backends(available_only=False, geometry=geometry_type or None)
+        if usable and config.reconstruction_backend not in usable:
+            config.reconstruction_backend = default_backend(geometry_type or None)
+        elif not usable and geometry_type:
+            self.status_message.emit(
+                f"no {geometry_type}-beam reconstruction backend is installed"
+                + (" -- pip install itk-rtk (the 'cone' extra, CPU) or astra-toolbox (GPU)" if geometry_type == "cone" else "")
+            )
+        if "num_iter" not in config.reconstruction_options and config.reconstruction_backend and get_backend(config.reconstruction_backend).is_iterative and n_angles and width:
             # Seeded once, on first knowledge -- same pattern as center/
             # preview_row/export_rows above -- so an iterative backend
             # actually gets a real num_iter passed through to reconstruct()
@@ -1185,17 +1104,6 @@ class AdjustmentPanel(QWidget):
                 n_angles * width if config.reconstruction_backend == "algotom_art" else _DEFAULT_NUM_ITER
             )
 
-        # Only backends that support this project's geometry; if the chosen one does not (e.g. the
-        # geometry was just switched to cone), take the first that does.
-        usable = list_backends(geometry=geometry_type or None)
-        listed = list_backends(available_only=False, geometry=geometry_type or None)
-        if usable and config.reconstruction_backend not in usable:
-            config.reconstruction_backend = usable[0]
-        elif not usable and geometry_type:
-            self.status_message.emit(
-                f"no {geometry_type}-beam reconstruction backend is installed"
-                + (" -- pip install itk-rtk (the 'cone' extra)" if geometry_type == "cone" else "")
-            )
         distances = {}
         for key in ("source_to_detector_distance", "source_to_object_distance"):
             answer = config.completion_answers.get(key)
@@ -1248,7 +1156,7 @@ class AdjustmentPanel(QWidget):
             width=width,
         )
         self.viewer.set_crop_rect(session.export_crop_yx)
-        self.auto_tab.set_values(session.cor_guess, session.cor_tolerance, session.cor_candidates)
+        self._refresh_scan_tab(session, width)
 
     # -- basic settings edits ------------------------------------------------
 
@@ -1307,6 +1215,7 @@ class AdjustmentPanel(QWidget):
     def _on_center_changed(self, value: float) -> None:
         if self.session is not None:
             self.session.config.center = value
+            self.auto_tab.set_current_center(value)
             self.session_changed.emit(self.session)
             if self._auto_update and self.session.imported:
                 self._auto_update_timer.start()  # restarts the pause if the wheel is still turning
@@ -1316,27 +1225,6 @@ class AdjustmentPanel(QWidget):
         if checked and self.session is not None and self.session.imported:
             self._reconstruct(all_slices=False)
 
-    def _on_guess_changed(self, _value: float) -> None:
-        if self.session is not None:
-            self.session.cor_guess = self.auto_tab.guess()
-
-    def _on_tolerance_changed(self, _value: float) -> None:
-        if self.session is not None:
-            self.session.cor_tolerance = self.auto_tab.tolerance()
-
-    def _use_current_center_as_guess(self) -> None:
-        if self.session is not None and self.session.config.center is not None:
-            self.auto_tab.set_guess(round(self.session.config.center, 1))
-
-    def _on_candidate_chosen(self, center: float) -> None:
-        """A candidate was clicked: make it the center (Basic settings
-        follows) and preview it -- instantly if it was already computed."""
-        if self.session is None:
-            return
-        self.session.config.center = center
-        self.basic_tab.set_center(center)
-        self.session_changed.emit(self.session)
-        self._reconstruct(all_slices=False)
 
     def _on_tilt_changed(self, value: float) -> None:
         if self.session is not None:
@@ -1585,68 +1473,153 @@ class AdjustmentPanel(QWidget):
 
     # -- automatic adjustments ------------------------------------------------
 
-    def _find_cor(self, guess: Optional[float] = None, tolerance: Optional[float] = None) -> None:
+    def _auto_find_center(self) -> None:
+        self._scan_center("vo", 0.0, 0.0, 0, auto=True, window=self.auto_tab.auto_window())
+
+    def _scan_center(
+        self, metric: str, shift_from: float, shift_to: float, points: int, auto: bool = False,
+        window: Optional[tuple] = None,
+    ) -> None:
         """
-        Searches for the center of rotation on the middle row. `guess` and
-        `tolerance` (both None = fully automatic) steer where it looks; the
-        best few candidates are listed in the tab, the winner is applied and
-        previewed, and the candidates are computed in the background so
-        trying each of them afterwards is instant.
+        Scans the center of rotation: the metric at `points` trial centers evenly spread over the shifts
+        `shift_from` .. `shift_to` from the detector middle, on the preview slice (for cone beam the
+        central one). Runs in the background, fills the picture cache as it goes, and when it is done
+        sets the best center and previews it; the slider then moves along the curve.
+
+        `auto` is the quick one-click estimate instead (PreviewEngine.auto_center()): Vo's search over `window`
+        (shifts from the detector middle; None = a tenth of the width either side), drawn as the curve it evaluated.
         """
         session = self.session
         if session is None or not session.imported:
             self.status_message.emit("open and import the project before calibrating")
             return
+        self._scan_cancel.set()           # a scan still running is replaced
+        self._prefetch_cancel.set()
+        cancel = threading.Event()
+        self._scan_cancel = cancel
+        project = session.run.project
+        _, n_rows, width = DataInterface(project).shape_of("projections")
+        centers = None if auto else center_grid(width, shift_from, shift_to, points)
+        config = copy.deepcopy(session.config)
+        row = session.preview_row if session.preview_row is not None else n_rows // 2
 
         def work():
-            project = session.run.project
-            reference = build_reference(
-                project, reducer=session.config.reference_reducer, dark_offset=session.config.dark_offset,
-                already_normalized=session.config.projections_normalized,
-            )
-            n_rows = DataInterface(project).shape_of("projections")[1]
-            middle_row = n_rows // 2
-            sinogram = normalize_slice(project, middle_row, reference)
-            half = half_scan_slice(DataInterface(project).get_metadata("angles"))
-            return search_center(
-                sinogram[half], backend=session.config.calibration_backend, guess=guess, tolerance=tolerance,
-            )
+            session.run.complete()
+            if auto:
+                return self.engine.auto_center(project, config, row, window=window, progress=self._scan_relay, cancelled=cancel.is_set)
+            scan = self.engine.scan(project, config, row, metric, centers, progress=self._scan_relay, cancelled=cancel.is_set)
+            return None, scan, None
+
+        def finish() -> bool:
+            """Common end of a scan; False when this scan no longer concerns what is on screen."""
+            if self._scan_cancel is not cancel:
+                return False              # replaced by a newer scan, which owns the busy state now
+            self.busy_changed.emit(False)
+            self.auto_tab.set_busy(False)
+            return self.session is session
 
         def done(result) -> None:
-            self.busy_changed.emit(False)
-            self.auto_tab.find_cor_btn.setEnabled(True)
-            session.cor_candidates = [(c.center, c.score) for c in result.candidates]
-            session.config.center = result.best
-            self.basic_tab.set_center(result.best)
-            width = DataInterface(session.run.project).shape_of("projections")[2]
-            offset_fraction = abs(result.best - width / 2.0) / width
-            message = f"found center of rotation: {result.best:.2f} ({offset_fraction:.1%} of width from image center)"
-            note = f"searched {result.start:.0f} to {result.stop:.0f}"
-            if offset_fraction > MAX_PLAUSIBLE_COR_OFFSET_FRACTION:
-                message += " -- further off-center than usual, double check"
-            if result.at_edge:
-                warning = (
-                    "the best match is at the edge of the search window, so the true center may lie outside it -- "
-                    "widen 'Search +/-' or change the guess"
+            search, scan, shown = result      # the quick estimate's search; the curve; the window the curve covers
+            session.cor_scan = scan
+            if not finish():
+                return
+            if scan is None:                 # a calibration backend that keeps no curve: the number alone
+                session.config.center = search.best
+                self.basic_tab.set_center(search.best)
+                self.auto_tab.set_scan(None)
+                self.auto_tab.set_current_center(search.best)
+                self.status_message.emit(f"Automatic estimate: center of rotation {search.best:.2f}")
+                self.session_changed.emit(session)
+                self._reconstruct(all_slices=False)
+                return
+            label = "Automatic estimate (Vo)" if auto else get_metric(scan.metric).label
+            offset = scan.best - image_center(width)
+            message = f"{label}: best center of rotation {scan.best:.2f} ({offset:+.2f} px from the detector middle)"
+            notes = []
+            if abs(scan.best - width / 2.0) / width > MAX_PLAUSIBLE_COR_OFFSET_FRACTION:
+                notes.append("further off-center than usual, double check")
+            if search is not None and search.at_edge:           # the quick estimate's window
+                notes.append(
+                    "the best is at the edge of the searched window"
+                    + (" (your range)" if window is not None else " (a tenth of the width either side of the middle)")
+                    + ": type a wider Range and press Auto again, or scan a wider range"
                 )
-                message += " -- " + warning
-                note += ". Warning: " + warning
-            elif len(result.candidates) > 1 and result.candidates[1].score > 0.8:
-                message += f" -- another candidate ({result.candidates[1].center:.1f}) scores almost as well, check the list"
-            self.auto_tab.set_candidates(session.cor_candidates, note)
-            self.status_message.emit(message)
+            elif search is None and scan.at_edge:
+                notes.append("the best trial is at the edge of the range, so the true center may lie outside it: widen the range")
+            elif scan.rival is not None and scan.rival[1] >= 0.8:
+                notes.append(f"another center ({scan.rival[0]:.1f}) scores almost as well ({scan.rival[1]:.2f}): look at the picture")
+            if scan.approximate:
+                notes.append(scan.approximate)
+            if shown is not None:            # the tab shows the window the quick estimate searched (the person's own, as typed)
+                shown = window if window is not None else shown
+                session.cor_metric, session.cor_range, session.cor_points = scan.metric, shown, len(scan.centers)
+                self.auto_tab.set_state(
+                    scan.metric, shown, len(scan.centers), scan, scan.best, range_edited=session.cor_range_user,
+                )
+            self.auto_tab.set_scan(scan)
+            session.config.center = scan.best
+            self.basic_tab.set_center(scan.best)
+            self.auto_tab.set_note("; ".join(notes).capitalize())
+            self.status_message.emit(message + (" -- " + notes[0] if notes else ""))
             self.session_changed.emit(session)
             self._reconstruct(all_slices=False)
-            self._schedule_prefetch([c.center for c in result.candidates[1:]])
 
         def failed(exc: Exception) -> None:
-            self.busy_changed.emit(False)
-            self.auto_tab.find_cor_btn.setEnabled(True)
-            self.status_message.emit(f"find center of rotation failed: {exc}")
+            if not finish():
+                return
+            if isinstance(exc, ScanCancelled):
+                self.status_message.emit("center scan cancelled")
+                return
+            self.status_message.emit(f"center scan failed: {describe_error(exc)}")
+            self.auto_tab.set_note(describe_error(exc))
 
         self.busy_changed.emit(True)
-        self.auto_tab.find_cor_btn.setEnabled(False)
+        self.auto_tab.set_busy(True)
+        if centers is not None:
+            self.auto_tab.set_progress(0, len(centers))
         self._workers.append(run_in_background(work, on_finished=done, on_failed=failed))
+
+    def _cancel_scan(self) -> None:
+        self._scan_cancel.set()
+
+    def _on_scan_settings_changed(self) -> None:
+        if self.session is not None:
+            self.session.cor_metric = self.auto_tab.metric()
+            self.session.cor_range = self.auto_tab.shift_range()
+            self.session.cor_points = self.auto_tab.points()
+            self.session.cor_range_user = self.auto_tab.range_edited
+
+    def _on_center_scrubbed(self, center: float, final: bool) -> None:
+        """The slider (or the line on the plot) moved to `center`: make it the center of rotation and show the
+        slice there -- at once if it was already computed, otherwise (after a short pause, so a drag does not
+        queue a reconstruction per pixel) from a reconstruction, which while the mouse is still down is
+        skipped when the last one took longer than a third of a second."""
+        session = self.session
+        if session is None:
+            return
+        session.config.center = center
+        self.basic_tab.set_center(center)
+        self.session_changed.emit(session)
+        if not session.imported:
+            return
+        row = session.preview_row if session.preview_row is not None else 0
+        if self.engine.cached(session.run.project, session.config, row, center) is not None:
+            self._preview_slice()
+        elif final or self._last_preview_seconds <= self.LIVE_SCRUB_SECONDS:
+            self._scrub_timer.start()
+
+    LIVE_SCRUB_SECONDS = 0.3
+
+    def _refresh_scan_tab(self, session: ProjectSession, width: int) -> None:
+        tab = self.auto_tab
+        tab.set_busy(False)
+        tab.set_width(width or None)
+        cone = session.imported and self.engine.is_cone(session.run.project)
+        tab.set_state(
+            session.cor_metric or ("sharpness" if cone else "vo"), session.cor_range or tab.default_range(),
+            session.cor_points or DEFAULT_POINTS, session.cor_scan, session.config.center,
+            range_edited=session.cor_range_user,
+        )
 
     def _find_tilt(self) -> None:
         session = self.session
@@ -1806,8 +1779,11 @@ class AdjustmentPanel(QWidget):
         ))
 
         def work() -> np.ndarray:
+            started = time.perf_counter()
             session.run.complete()
-            return self.engine.compute(project, config, row, center)
+            image = self.engine.compute(project, config, row, center)
+            self._last_preview_seconds = time.perf_counter() - started
+            return image
 
         def done(image: np.ndarray) -> None:
             self._preview_inflight = False
@@ -1842,7 +1818,8 @@ class AdjustmentPanel(QWidget):
         device_used = resolve_device(session.config.reconstruction_backend, session.config.device)
         self.progress_event.emit(ProgressEvent(session.project_id, "Done", 1, 1, device_used, "preview"))
         message = (
-            f"preview of {session.project_id}, slice {session.preview_row}, center {center:.2f}: "
+            f"preview of {session.project_id}, "
+            f"{'central slice' if self.engine.is_cone(session.run.project) else f'slice {session.preview_row}'}, center {center:.2f}: "
             f"{image.shape}, 1/cm ({device_used.upper()})" + (" [remembered]" if cached else "")
         )
         # The 1/cm unit is only physically meaningful if pixel size

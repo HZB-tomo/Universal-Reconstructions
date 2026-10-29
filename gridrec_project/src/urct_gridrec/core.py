@@ -125,9 +125,9 @@ class DefaultOps:
         """Divide out the kernel's transform, apply the field-of-view mask, and write the real
         part to out_a and (if given) the imaginary part to out_b."""
         image = image * inv_deapod
-        out_a[:] = self.to_host(image.real) * mask
+        out_a[:] = self.to_host(image.real * mask)
         if out_b is not None:
-            out_b[:] = self.to_host(image.imag) * mask
+            out_b[:] = self.to_host(image.imag * mask)
 
     def ifft2_crop(self, plan: Plan, core):
         """Inverse 2D FFT of the n x n spectrum, then the width x width image."""

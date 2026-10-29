@@ -9,6 +9,7 @@ import pytest
 
 from orchestration.config import PipelineStageError, ProjectConfig
 from orchestration.pipeline import PipelineRun
+from reconstruction import default_backend
 from tests.fixtures.generate_hypothetical_synchrotron import generate as generate_hypothetical
 from tests.fixtures.realistic_phantom import generate as generate_phantom
 from tests.fixtures.realistic_phantom import write_hdf5
@@ -44,7 +45,7 @@ def test_run_all_succeeds_end_to_end_with_full_auto_calibration(tmp_path):
         assert f["/entry/volume/data"].dtype == np.float32
         import json
         settings = json.loads(f["/entry/volume/data"].attrs["reconstruction_settings"])
-        assert settings["backend"] == "algotom_fbp"
+        assert settings["backend"] == default_backend("parallel")       # nothing chosen: gridrec
         assert "center" in settings
         assert "tilt_deg" in settings
 

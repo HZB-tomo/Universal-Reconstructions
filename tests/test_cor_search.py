@@ -56,6 +56,16 @@ def test_automatic_search_finds_the_axis_and_lists_weaker_alternatives(sinogram)
     assert not result.at_edge
 
 
+def test_the_search_hands_over_the_curve_it_evaluated(sinogram):
+    sino, true = sinogram
+    result = search_center(sino, "algotom")
+    centers, metrics = result.curve
+    assert len(centers) == len(metrics) and centers[0] == result.start and centers[-1] == result.stop       # every column
+    assert np.all(np.diff(centers) == 1.0)
+    assert centers[int(np.argmin(metrics))] == pytest.approx(true, abs=1.0)
+    assert search_center(np.zeros((10, 100)), _FixedBackend()).curve is None       # a backend that keeps none
+
+
 def test_a_guess_with_tolerance_restricts_the_search(sinogram):
     sino, true = sinogram
     result = search_center(sino, "algotom", guess=true - 8, tolerance=15)

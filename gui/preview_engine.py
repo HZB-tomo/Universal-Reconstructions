@@ -30,10 +30,20 @@ from orchestration import ProjectConfig
 from orchestration.geometry import geometry_from_project
 from orchestration.preprocess import preprocess_rows
 from preprocessing import build_reference
+from calibration import CenterScan, half_scan_slice, image_center, scan_centers, scan_from_curve, search_center
+from calibration.metrics import get_metric
 from reconstruction import Geometry, reconstruct, reconstruct_rotated
 
 DEFAULT_MAX_BYTES = 512 * 1024 ** 2
 _MAX_NORMALIZED_ROWS = 8
+# Cone beam: the one slice that can be reconstructed from its own detector rows is the central one, the plane
+# through the source perpendicular to the rotation axis (every ray in it stays in it). It stands in for `row`.
+CENTRAL_PLANE = -1
+AUTO_HALF_WINDOW = 0.1               # the quick estimate looks this fraction of the width either side of the middle
+CONE_APPROXIMATE = (
+    "cone beam: this method assumes parallel rays, so on the fan-beam sinogram of the central plane it is only "
+    "approximate (the error grows with the cone angle); the image-based metrics are exact"
+)
 
 
 def _dict_key(d: dict) -> str:
@@ -55,7 +65,7 @@ def preprocessing_key(config: ProjectConfig) -> tuple:
 def reconstruction_key(config: ProjectConfig) -> tuple:
     """Settings, other than the row and the center, that change the picture."""
     return (
-        preprocessing_key(config), config.reconstruction_backend, config.device,
+        preprocessing_key(config), config.reconstruction_backend, config.device, config.reconstruction_filter,
         _dict_key(config.backend_options()), config.rotate_deg or 0.0, _dict_key(config.completion_answers),
     )
 
@@ -73,8 +83,20 @@ class PreviewEngine:
     # -- cache ---------------------------------------------------------------
 
     @staticmethod
-    def image_key(project, config: ProjectConfig, row: int, center: float) -> tuple:
-        return (id(project), int(row), round(float(center), 4), reconstruction_key(config))
+    def is_cone(project) -> bool:
+        try:
+            return DataInterface(project).get_metadata("geometry_type") == "cone"
+        except Exception:  # noqa: BLE001 -- not completed yet: the geometry is not known, so not cone
+            return False
+
+    @classmethod
+    def effective_row(cls, project, row: int) -> int:
+        """The row a preview really reconstructs: `row` for parallel beam, the central plane for cone beam."""
+        return CENTRAL_PLANE if cls.is_cone(project) else int(row)
+
+    @classmethod
+    def image_key(cls, project, config: ProjectConfig, row: int, center: float) -> tuple:
+        return (id(project), cls.effective_row(project, row), round(float(center), 4), reconstruction_key(config))
 
     def cached(self, project, config: ProjectConfig, row: int, center: float) -> Optional[np.ndarray]:
         key = self.image_key(project, config, row, center)
@@ -123,7 +145,13 @@ class PreviewEngine:
                     already_normalized=config.projections_normalized,
                 )
                 self._references[ref_key] = reference
-            normalized = preprocess_rows(project, config, reference, slice(row, row + 1))
+            if row == CENTRAL_PLANE:
+                n_rows = DataInterface(project).shape_of("projections")[1]
+                lo, hi = (n_rows - 1) // 2, n_rows // 2 + 1       # one row, or the two around the plane (even count)
+                block = preprocess_rows(project, config, reference, slice(lo, hi))
+                normalized = block.mean(axis=1, keepdims=True, dtype=np.float32)
+            else:
+                normalized = preprocess_rows(project, config, reference, slice(row, row + 1))
             self._normalized[key] = normalized
             while len(self._normalized) > _MAX_NORMALIZED_ROWS:
                 self._normalized.popitem(last=False)
@@ -133,33 +161,91 @@ class PreviewEngine:
         """The reconstructed (height, width) slice `row` with rotation center
         `center`: from the cache if it was computed before, else computed
         now and remembered. `project` must already be completed."""
+        config.resolve_backend(DataInterface(project).get_metadata("geometry_type"))     # nothing chosen: the default
+        row = self.effective_row(project, row)
         hit = self.cached(project, config, row, center)
         if hit is not None:
             return hit
         normalized = self._normalized_row(project, config, row)
         di = DataInterface(project)
         geometry = geometry_from_project(project)
-        if geometry.geometry_type == "cone":
-            raise ValueError(
-                "single-slice previews are not available for cone-beam data (every slice needs every detector row): "
-                "use 'Reconstruct all slices'"
-            )
         angles = di.get_metadata("angles")
+        options = config.backend_options()
+        if row == CENTRAL_PLANE:
+            options["size_z"] = 1      # one slice, at the height of the source
         if config.rotate_deg:
             volume = reconstruct_rotated(
                 normalized, angles, float(center), geometry=geometry, backend=config.reconstruction_backend,
-                rotate_deg=config.rotate_deg, device=config.device, **config.backend_options(),
+                rotate_deg=config.rotate_deg, device=config.device, **options,
             )
         else:
             volume = reconstruct(
                 normalized, angles, float(center), geometry=geometry, backend=config.reconstruction_backend,
-                device=config.device, **config.backend_options(),
+                device=config.device, **options,
             )
         image = np.array(volume[0], dtype=np.float32)
         with self._lock:
             self.reconstructions += 1
         self._store(self.image_key(project, config, row, center), image)
         return image
+
+    def scan(
+        self, project, config: ProjectConfig, row: int, metric: str, centers, progress=None,
+        cancelled: Callable[[], bool] = lambda: False,
+    ) -> CenterScan:
+        """The curve of `metric` over the trial `centers` for the slice `row` (for cone beam the central
+        plane). Slice metrics go through compute(), so every picture they need is remembered: scrubbing the
+        center afterwards is instant. Works on a private copy of `config`. Raises calibration.ScanCancelled
+        when `cancelled()` turns true."""
+        config = copy.deepcopy(config)
+        row = self.effective_row(project, row)
+        sinogram = angles = None
+        reconstruct_at = None
+        approximate = ""
+        if get_metric(metric).kind == "sinogram":
+            sinogram = self._normalized_row(project, config, row)[:, 0, :]
+            angles = DataInterface(project).get_metadata("angles")
+            if row == CENTRAL_PLANE:
+                approximate = CONE_APPROXIMATE
+        else:
+            reconstruct_at = lambda center: self.compute(project, config, row, center)
+        return scan_centers(
+            metric, centers, sinogram=sinogram, angles=angles, reconstruct=reconstruct_at, progress=progress,
+            cancelled=cancelled, approximate=approximate,
+        )
+
+    def auto_center(
+        self, project, config: ProjectConfig, row: int, window: Optional[tuple] = None, progress=None,
+        cancelled: Callable[[], bool] = lambda: False,
+    ) -> tuple:
+        """
+        The quick estimate: Vo's search (calibration.search_center(), coarse over every column of the window,
+        then refined to 0.25 px) over `window`, given as shifts from the detector middle: by default a tenth of
+        the width either side, since a real center is within a few percent of the middle. Returns (CenterSearch,
+        CenterScan, window): the search, the curve the search itself evaluated on the way (shown, not recomputed;
+        None if the backend keeps none) with the search's own refined answer as its best, and the window it
+        covers as shifts from the detector middle. `search.at_edge` says the answer sits at the edge of the window.
+        """
+        config = copy.deepcopy(config)
+        row = self.effective_row(project, row)
+        sinogram = self._normalized_row(project, config, row)[:, 0, :]
+        angles = DataInterface(project).get_metadata("angles")
+        width = sinogram.shape[1]
+        if window is None:
+            window = (-AUTO_HALF_WINDOW * width, AUTO_HALF_WINDOW * width)
+        middle = image_center(width)
+        search = search_center(
+            sinogram[half_scan_slice(angles)], backend=config.calibration_backend,
+            start=max(0.0, middle + window[0]), stop=min(width - 1.0, middle + window[1]),
+            n_candidates=1,       # refining a candidate at full resolution is most of the cost; the curve shows any rival
+        )
+        if search.curve is None:
+            return search, None, None
+        centers, values = search.curve
+        scan = scan_from_curve(
+            "vo", centers, values, best=search.best, approximate=CONE_APPROXIMATE if row == CENTRAL_PLANE else "",
+        )
+        return search, scan, (float(centers[0]) - middle, float(centers[-1]) - middle)
 
     def prefetch(
         self, project, config: ProjectConfig, row: int, centers: Iterable[float],

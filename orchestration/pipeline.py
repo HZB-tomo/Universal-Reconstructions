@@ -75,8 +75,19 @@ class PipelineRun:
         if self.progress is not None:
             self.progress(ProgressEvent(self.project_id, stage, done, total, device))
 
+    def _settle_backend(self) -> str:
+        """The reconstruction backend by name: if none was chosen, the default for the project's geometry.
+        complete() does this; the stages that can run on a project completed elsewhere (the GUI hands one over) do it too."""
+        if self.config.reconstruction_backend is None:
+            geometry_type = DataInterface(self.project).get_metadata("geometry_type") if self.project is not None else None
+            try:
+                self.config.resolve_backend(geometry_type)
+            except ValueError as e:
+                raise PipelineStageError("reconstruct", str(e)) from e
+        return self.config.reconstruction_backend
+
     def _device(self) -> str:
-        return resolve_device(self.config.reconstruction_backend, self.config.device)
+        return resolve_device(self._settle_backend(), self.config.device)
 
     # -- stages -----------------------------------------------------------
 
@@ -110,6 +121,7 @@ class PipelineRun:
                 raise PipelineStageError("complete", f"missing required fields: {still_missing}", fields=still_missing)
 
         self._log("completion resolved")
+        self._log(f"reconstruction backend: {self._settle_backend()}")
 
     def preprocess(self) -> np.ndarray:
         self._report("Normalizing projections")
@@ -175,6 +187,7 @@ class PipelineRun:
         # resolved them (see ProjectConfig.reconstruction_backend's
         # comment), so this is the single place they're allowed to come
         # from, not a second, possibly-disagreeing source.
+        self._settle_backend()
         di = DataInterface(self.project)
         geometry = geometry_from_project(self.project)
         self._check_cone_beam_supported(geometry)
@@ -305,6 +318,7 @@ class PipelineRun:
         return self._run_streaming()
 
     def _run_streaming(self) -> str:
+        self._settle_backend()
         """
         The streaming counterpart to preprocess()+calibrate()+
         reconstruct()+postprocess()+export(): reconstructs and writes

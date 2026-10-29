@@ -131,8 +131,8 @@ tomo-gui                      # the desktop GUI
 | `preprocessing` | algotom | zinger/ring removal, the `algotom_fbp`/`algotom_bpf`/`algotom_dfi` reconstruction backends, the `algotom` center-of-rotation search |
 | `gridrec` | urct_gridrec (+ numba) | the `gridrec` reconstruction backend (fast; pure Python) |
 | `gridrec_gpu` | CuPy (CUDA 12) | gridrec on an NVIDIA GPU (experimental, see below) |
-| `cone` | itk-rtk (large: brings ITK) | cone-beam FDK reconstruction, the `rtk_fdk` backend (CPU; see [`doc/CONE_BEAM.md`](./doc/CONE_BEAM.md)) |
-| `reconstruction_extra` | astra-toolbox | the ASTRA backends `algotom_bp/sirt/sart/art/cgls` |
+| `cone` | itk-rtk (large: brings ITK) | cone-beam FDK reconstruction on the CPU, the `rtk_fdk` backend ( see [`doc/CONE_BEAM.md`](./doc/CONE_BEAM.md)) |
+| `reconstruction_extra` | astra-toolbox | the ASTRA backends `algotom_bp/sirt/sart/art/cgls`, and the GPU cone-beam backend `astra_fdk` |
 | `all` | `gui` + `preprocessing` + `gridrec` | the usual full install |
 
 Combine them as you like: `pip install -e ".[gui,gridrec]"`. A reconstruction

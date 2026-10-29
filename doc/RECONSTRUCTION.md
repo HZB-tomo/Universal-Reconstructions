@@ -62,9 +62,15 @@ phantom).
 
 ## Built-in backends
 
-Eleven backends. Ten are parallel-beam: nine wrap `algotom`, and `gridrec` is
-this project's own implementation (see below). The eleventh, `rtk_fdk`, is the cone-beam one (see
-[`CONE_BEAM.md`](./CONE_BEAM.md)). Each backend declares the
+**Which one is used when nobody chose** (`ProjectConfig.reconstruction_backend` unset, `backend` blank in the INI
+file, nothing picked in the GUI): `reconstruction.default_backend(geometry_type)` -- `gridrec` for parallel beam
+(`algotom_fbp` if gridrec is not installed) and `astra_fdk` for cone beam (`rtk_fdk` if there is no GPU or no ASTRA).
+The pipeline settles it once the geometry is known, so a cone-beam project needs no backend named. A backend you
+name is never replaced; one that does not support the project's geometry is an error.
+
+Twelve backends. Ten are parallel-beam: nine wrap `algotom`, and `gridrec` is
+this project's own implementation (see below). The other two, `rtk_fdk` (CPU) and `astra_fdk` (GPU),
+are cone-beam (see [`CONE_BEAM.md`](./CONE_BEAM.md)). Each backend declares the
 packages it needs (`ReconstructionBackend.requires`); one whose packages are
 missing stays registered but is left out of the GUI's algorithm list, and
 `reconstruction.list_backends()` returns only the usable ones.
@@ -74,6 +80,7 @@ missing stays registered but is left out of the GUI's algorithm list, and
 | `algotom_fbp` | `fbp_reconstruction` | CPU/GPU | `algotom` (via the `preprocessing` extra) |
 | `gridrec` | `urct_gridrec` (own implementation) | CPU; GPU on request (experimental) | `urct_gridrec` (the `gridrec` extra) |
 | `rtk_fdk` | RTK's `FDKConeBeamReconstructionFilter` | CPU | `itk-rtk` (the `cone` extra); **cone-beam only** |
+| `astra_fdk` | ASTRA's `FDK_CUDA` | GPU only (NVIDIA) | `astra-toolbox` (the `reconstruction_extra` extra); **cone-beam only** |
 | `algotom_gridrec` | `gridrec_reconstruction` | CPU only | `algotom` **and** `tomopy` (conda-only, no pip wheel -- see below) |
 | `algotom_bpf` | `bpf_reconstruction` | CPU/GPU | `algotom` |
 | `algotom_dfi` | `dfi_reconstruction` | CPU only | `algotom` |
@@ -404,6 +411,7 @@ the highest frequencies: less noise, slightly less fine detail.
 | `algotom_fbp`, `algotom_bpf`, `algotom_dfi` | ramp, hann, hamming, bartlett, blackman, nuttall, parzen, triang | hann |
 | `gridrec` | ramp, hann, hamming, cosine, shepp-logan | hann |
 | `rtk_fdk` (cone) | hann, ramp, shepp-logan, cosine | hann |
+| `astra_fdk` (cone) | hann, ramp, shepp-logan, cosine, hamming | hann |
 | iterative (SIRT, SART, ART, CGLS) | none (the filter step does not exist) | -- |
 
 Rough order from sharpest/noisiest to smoothest: ramp, shepp-logan, cosine, hamming,

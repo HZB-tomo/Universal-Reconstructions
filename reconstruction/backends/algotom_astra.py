@@ -38,7 +38,8 @@ or badly under-converged result.
 
 `EM_CUDA` (expectation-maximization) exists in astra_reconstruction
 too but has no CPU counterpart at all, unlike these five, which all
-have both a plain and a "_CUDA" form -- left out so every backend here
+have both a plain and a "_CUDA" form (except ART, which has no ART_CUDA
+in ASTRA and always runs on the CPU) -- left out so every backend here
 keeps working the same way regardless of device.
 
 astra_reconstruction() falls back to the plain (CPU) method itself,
@@ -62,8 +63,9 @@ class AlgotomBpBackend(ReconstructionBackend):
     name = "algotom_bp"
     supported_geometries = {"parallel"}
     requires = ("algotom", "astra")   # astra: the astra-toolbox package
-    install_hint = "Install with: conda install -c astra-toolbox astra-toolbox (not available on pip)"
+    install_hint = "Install with: pip install astra-toolbox (or conda install -c astra-toolbox astra-toolbox)"
     _method_base = "BP"
+    _has_cuda = True        # whether ASTRA has a "<method>_CUDA" form of this algorithm
 
     def reconstruct(
         self,
@@ -76,7 +78,7 @@ class AlgotomBpBackend(ReconstructionBackend):
     ) -> np.ndarray:
         rec = algotom_reconstruction(self.name)
 
-        gpu = True if device is None else (device == "gpu")
+        gpu = self._has_cuda and (True if device is None else (device == "gpu"))
         method = f"{self._method_base}_CUDA" if gpu else self._method_base
 
         angles_rad = np.radians(angles)
@@ -90,7 +92,7 @@ class AlgotomBpBackend(ReconstructionBackend):
         return np.stack(images)
 
     def actual_device(self, device: Optional[str] = None) -> str:
-        wants_gpu = True if device is None else (device == "gpu")
+        wants_gpu = self._has_cuda and (True if device is None else (device == "gpu"))
         if not wants_gpu:
             return "cpu"
         return "gpu" if algotom_reconstruction(self.name).cuda.is_available() else "cpu"
@@ -115,6 +117,7 @@ class AlgotomArtBackend(AlgotomBpBackend):
     name = "algotom_art"
     _method_base = "ART"
     is_iterative = True
+    _has_cuda = False       # ASTRA has no ART_CUDA (checked with ASTRA 2.5): always the CPU algorithm
 
 
 @register_backend

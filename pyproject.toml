@@ -42,7 +42,7 @@ preprocessing = ["algotom"]
 # needs a third thing, tomopy, which has no pip wheel at all and must
 # be installed separately via conda (`conda install -c conda-forge
 # tomopy`); not listed here for that reason.
-reconstruction_extra = ["astra-toolbox"]
+reconstruction_extra = ["astra-toolbox"]  # also the GPU cone-beam backend `astra_fdk`
 # The `gridrec` reconstruction backend: Fourier-gridding FBP, several times
 # to tens of times faster than FBP, pure Python (Numba), plain pip install.
 # It lives in this repository as its own package, gridrec_project/. Until it

@@ -26,7 +26,8 @@ def scan(tmp_path):
 
 
 def _config(scan, **kwargs):
-    base = dict(path=str(scan), format="hdf5", storage_mode="disk", center=20.0, tilt_deg=0.0)
+    base = dict(path=str(scan), format="hdf5", storage_mode="disk", center=20.0, tilt_deg=0.0,
+                reconstruction_backend="algotom_fbp")        # streamed and eager must agree exactly: a deterministic reference
     return ProjectConfig(**{**base, **kwargs})
 
 

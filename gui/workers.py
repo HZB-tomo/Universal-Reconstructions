@@ -56,3 +56,12 @@ class ProgressRelay(QObject):
 
     def __call__(self, progress_event) -> None:
         self.event.emit(progress_event)
+
+
+class ScanRelay(QObject):
+    """Progress of a center-of-rotation scan, from the worker thread to the GUI thread (queued)."""
+
+    progress = Signal(int, int)  # trial centers done, total
+
+    def __call__(self, done: int, total: int) -> None:
+        self.progress.emit(done, total)

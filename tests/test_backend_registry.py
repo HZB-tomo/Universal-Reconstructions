@@ -47,7 +47,7 @@ def test_list_backends_uses_the_display_order_then_alphabetical(scratch_registry
     backend_module._REGISTRY.clear()
     for name in ("zeta_custom", "algotom_bpf", "alpha_custom", "gridrec", "algotom_fbp"):
         _fake(name)
-    assert list_backends() == ["algotom_fbp", "gridrec", "algotom_bpf", "alpha_custom", "zeta_custom"]
+    assert list_backends() == ["gridrec", "algotom_fbp", "algotom_bpf", "alpha_custom", "zeta_custom"]
 
 
 def test_a_user_backend_shows_up_without_any_gui_change(scratch_registry):

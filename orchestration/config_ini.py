@@ -341,7 +341,7 @@ storage_mode = ram
 # tilt_deg =           # blank = auto find_tilt()
 
 [reconstruction]
-backend = algotom_fbp
+# backend =           # blank = gridrec (parallel beam) or astra_fdk on the GPU (cone beam); see doc/RECONSTRUCTION.md
 # filter = hann        # ramp (sharpest, noisiest), hann, hamming, ...; blank = the algorithm's default
 # rotate_deg =         # blank = no rotation; degrees about the scan axis
 
@@ -371,7 +371,7 @@ _BATCH_TEMPLATE = """\
 # additional project.
 
 [DEFAULT:reconstruction]
-backend = algotom_fbp
+# backend =           # blank = gridrec (parallel beam) or astra_fdk on the GPU (cone beam)
 
 [DEFAULT:postprocess]
 dtype = float32

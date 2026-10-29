@@ -17,8 +17,8 @@ from gui.adjustment_panel import AdjustmentPanel, BasicSettingsTab  # noqa: E402
 from gui.session import ProjectSession  # noqa: E402
 from gui.viewer import ImageViewer  # noqa: E402
 from orchestration import PipelineRun, ProjectConfig  # noqa: E402
-from reconstruction import list_backends  # noqa: E402
-from tests.test_cone_beam import (  # noqa: E402
+from reconstruction import default_backend, list_backends  # noqa: E402
+from tests.fixtures.cone_phantom import (  # noqa: E402
     AXIS_COLUMN, COLS, N_ANGLES, ROWS, SDD, SOD, SPHERES, analytic_projections, blobs, voxel_size_mm,
 )
 
@@ -83,10 +83,10 @@ def test_switching_geometry_changes_the_algorithm_list_and_the_backend(app, cone
         panel.set_session(session)
         tab = panel.basic_tab
         items = lambda: [tab.backend_combo.itemText(i) for i in range(tab.backend_combo.count())]
-        assert items() == list_backends(available_only=False, geometry="parallel") and session.config.reconstruction_backend == "algotom_fbp"
+        assert items() == list_backends(available_only=False, geometry="parallel") and session.config.reconstruction_backend == default_backend("parallel")
 
         tab.geometry_combo.setCurrentText("cone")
-        assert items() == list_backends(available_only=False, geometry="cone") and session.config.reconstruction_backend == "rtk_fdk"
+        assert items() == list_backends(available_only=False, geometry="cone") and session.config.reconstruction_backend == default_backend("cone")
         assert session.config.completion_answers["geometry_type"] == "cone"
 
         tab.distance_spins["source_to_detector_distance"].setValue(300.0)
@@ -97,7 +97,7 @@ def test_switching_geometry_changes_the_algorithm_list_and_the_backend(app, cone
         assert "source_to_object_distance" not in session.config.completion_answers
 
         tab.geometry_combo.setCurrentText("parallel")
-        assert items() == list_backends(available_only=False, geometry="parallel") and session.config.reconstruction_backend == "algotom_fbp"
+        assert items() == list_backends(available_only=False, geometry="parallel") and session.config.reconstruction_backend == default_backend("parallel")
     finally:
         session.run.project.close()
 
@@ -109,7 +109,7 @@ def test_a_cone_project_reconstructs_from_the_panel(app, cone_file):
     try:
         panel = AdjustmentPanel(ImageViewer())
         panel.set_session(session)
-        assert session.config.reconstruction_backend == "rtk_fdk"            # chosen because the geometry is cone
+        assert session.config.reconstruction_backend == default_backend("cone")            # chosen because the geometry is cone
         reconstruct_dialog.ReconstructDestinationDialog.exec = lambda self: (self.ram_radio.setChecked(True) or True)
         panel._reconstruct(all_slices=True)
         deadline = time.time() + 120
@@ -124,7 +124,7 @@ def test_a_cone_project_reconstructs_from_the_panel(app, cone_file):
         session.run.project.close()
 
 
-def test_a_single_slice_preview_explains_itself_for_cone_beam(app, cone_file):
+def test_a_single_slice_preview_shows_the_central_plane_for_cone_beam(app, cone_file):
     session = _session(
         cone_file, geometry_type="cone", source_to_detector_distance=SDD, source_to_object_distance=SOD,
     )
@@ -134,10 +134,88 @@ def test_a_single_slice_preview_explains_itself_for_cone_beam(app, cone_file):
         messages = []
         panel.status_message.connect(messages.append)
         panel._reconstruct(all_slices=False)
-        deadline = time.time() + 60
-        while not any("failed" in m for m in messages) and time.time() < deadline:
+        deadline = time.time() + 120
+        while not any("preview of" in m or "failed" in m for m in messages) and time.time() < deadline:
             app.processEvents()
             time.sleep(0.05)
-        assert any("Reconstruct all slices" in m for m in messages)
+        assert any("central slice" in m for m in messages), messages
+    finally:
+        session.run.project.close()
+
+
+def test_scanning_the_center_from_the_panel_and_scrubbing_the_slider(app, cone_file):
+    session = _session(
+        cone_file, geometry_type="cone", source_to_detector_distance=SDD, source_to_object_distance=SOD,
+    )
+    try:
+        panel = AdjustmentPanel(ImageViewer())
+        panel.set_session(session)
+        tab = panel.auto_tab
+        assert tab.metric() == "sharpness"                       # the exact one for cone beam
+        tab.metric_combo.setCurrentIndex(tab.metric_combo.findData("sharpness"))
+        tab.from_spin.setValue(-4.0)
+        tab.to_spin.setValue(8.0)
+        tab.points_spin.setValue(13)
+        assert (session.cor_range, session.cor_points) == ((-4.0, 8.0), 13)       # remembered per project
+        tab.scan_btn.click()
+        deadline = time.time() + 180
+        while (tab._busy or tab.scan() is None) and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.05)
+        scan = tab.scan()
+        assert scan is not None and scan.best == pytest.approx(AXIS_COLUMN, abs=0.75) and not scan.at_edge
+        assert session.config.center == pytest.approx(scan.best) and session.cor_scan is scan
+        # the slider moves the center of rotation along the scanned range, and Basic settings follows
+        tab.slider.setValue(0)
+        assert session.config.center == pytest.approx(scan.centers[0])
+        assert panel.basic_tab.center_spin.value() == pytest.approx(scan.centers[0], abs=0.01)
+    finally:
+        session.run.project.close()
+
+
+def test_auto_find_center_from_the_panel_gives_an_estimate_and_a_curve(app, cone_file):
+    session = _session(
+        cone_file, geometry_type="cone", source_to_detector_distance=SDD, source_to_object_distance=SOD,
+    )
+    try:
+        panel = AdjustmentPanel(ImageViewer())
+        panel.set_session(session)
+        session.config.center = None
+        tab = panel.auto_tab
+        tab.auto_btn.click()
+        deadline = time.time() + 120
+        while (tab._busy or tab.scan() is None) and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.05)
+        scan = tab.scan()
+        assert scan is not None and scan.metric == "vo" and 10 <= len(scan.centers) <= 16        # every column of a tenth either side of the middle of 64
+        assert scan.best == pytest.approx(AXIS_COLUMN, abs=3.0)       # Vo on a fan-beam sinogram: approximate
+        assert session.config.center == pytest.approx(scan.best) and tab.metric() == "vo"
+        assert session.cor_metric == "vo" and session.cor_points == len(scan.centers) and "approximate" in tab.note_label.text().lower()
+    finally:
+        session.run.project.close()
+
+
+def test_auto_find_center_searches_the_typed_range_and_a_zoom_does_not_count_as_typing(app, cone_file):
+    session = _session(
+        cone_file, geometry_type="cone", source_to_detector_distance=SDD, source_to_object_distance=SOD,
+    )
+    try:
+        panel = AdjustmentPanel(ImageViewer())
+        panel.set_session(session)
+        tab = panel.auto_tab
+        assert not tab.range_edited and tab.auto_window() is None
+        tab.from_spin.setValue(-3.0)
+        tab.to_spin.setValue(7.0)
+        assert tab.range_edited and tab.auto_window() == (-3.0, 7.0) and session.cor_range_user
+        tab.auto_btn.click()
+        deadline = time.time() + 120
+        while (tab._busy or tab.scan() is None) and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.05)
+        scan = tab.scan()
+        assert scan.centers[0] >= 31.5 - 3.0 - 1.0 and scan.centers[-1] <= 31.5 + 7.0 + 1.0       # only that window was searched
+        assert scan.best == pytest.approx(AXIS_COLUMN, abs=3.0) and tab.shift_range() == (-3.0, 7.0)   # the boxes keep what was typed
+        assert tab.range_edited
     finally:
         session.run.project.close()

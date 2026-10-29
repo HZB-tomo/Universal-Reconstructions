@@ -12,9 +12,11 @@ same accuracy and the same output scale (see gridrec_project/README.md).
 It is also deterministic: the same input always gives the same bits.
 
 Devices: CPU is the default and the tested path. `device="gpu"` runs the
-FFTs on CuPy and the gridding as a numba.cuda kernel; that path is verified
-against the CPU on numba's CUDA simulator but has not been timed or run on a
-real GPU yet, so it is only used when asked for explicitly. "Auto" means CPU.
+FFTs on CuPy and the gridding as a numba.cuda kernel. It agrees with the CPU
+to about 1e-6 (checked on an RTX 6000 Ada) but is not faster for small slices
+(256 wide, 4 slices: 0.37 s against 0.12 s), so it is only used when asked for
+explicitly. "Auto" means CPU. Its float32 atomic adds make the GPU result
+repeatable to rounding only, not bit for bit.
 
 The input is transmission (what normalization produces); the -log is taken
 inside, like the algotom backends do.

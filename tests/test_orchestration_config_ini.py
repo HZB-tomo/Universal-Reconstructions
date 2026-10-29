@@ -41,7 +41,7 @@ def test_load_config_single_project_reads_every_section(tmp_path):
     assert config.completion_answers == {"geometry_type": "parallel"}
     assert config.center == 56.0
     assert config.tilt_deg is None  # blank -> stays the dataclass default
-    assert config.reconstruction_backend == "algotom_fbp"
+    assert config.reconstruction_backend == "algotom_fbp"   # named in this file
     assert config.dtype == "uint16"
     assert config.export_format == "hdf5"
     assert config.export_path == "out/volume.h5"
@@ -174,7 +174,7 @@ def test_write_config_template_produces_a_loadable_config(tmp_path):
 
     config = load_config(path)  # should not raise
 
-    assert config.reconstruction_backend == "algotom_fbp"
+    assert config.reconstruction_backend is None            # blank: the default for the project's geometry
 
 
 def test_write_config_template_batch_produces_a_loadable_batch_config(tmp_path):
@@ -184,7 +184,7 @@ def test_write_config_template_batch_produces_a_loadable_batch_config(tmp_path):
     configs = load_config(path)  # should not raise
 
     assert "project_a" in configs
-    assert configs["project_a"].reconstruction_backend == "algotom_fbp"
+    assert configs["project_a"].reconstruction_backend is None
 
 
 def test_resolve_config_prefers_explicit_over_sidecar(tmp_path):

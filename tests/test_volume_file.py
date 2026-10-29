@@ -158,7 +158,7 @@ def test_a_pipeline_run_writes_a_traceable_volume(tmp_path, stream):
     source = convert_to_hdf5(tmp_path / "tiff", tmp_path / "scan.h5")
     config = ProjectConfig(path=str(source), format="hdf5", export_path=str(tmp_path / "out.h5"),
                            center=23.5, tilt_deg=0.0, stream=stream, reconstruction_filter="hamming",
-                           ring_correction=True)
+                           ring_correction=True, reconstruction_backend="algotom_fbp")
     result = PipelineRun(config).run_all()
     assert result.success, result.error
 

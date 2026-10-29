@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: urct_gridrec
-Version: 0.1.0
+Version: 0.2.0
 Summary: Gridrec (Fourier-gridding) tomographic reconstruction in NumPy/Numba, for CPU and GPU. A standalone prototype for URCT; no dependency on it.
 License: MIT
 Classifier: License :: OSI Approved :: MIT License
@@ -21,9 +21,18 @@ Requires-Dist: pytest; extra == "dev"
 # urct_gridrec
 
 Gridrec (Fourier-gridding) tomographic reconstruction in NumPy/Numba for CPU and
-GPU. A standalone prototype: it imports nothing from URCT, and URCT does not
-import it. The main project's backends are only used by the benchmarks and one
-optional test, as the thing to compare against.
+GPU. A package of its own: it imports nothing from URCT, and can be used without
+it. URCT uses it through its `gridrec` reconstruction backend
+(`reconstruction/backends/gridrec.py`). The main project's FBP backend appears
+only in the benchmarks and one optional test, as the thing to compare against.
+
+```bash
+pip install -e ./gridrec_project            # from the repository root; add ".[gpu]" for CuPy
+```
+
+It is a pure-Python package (Numba compiles the hot loops on first use and caches
+them), so it builds into a single `py3-none-any` wheel that works everywhere:
+`pip wheel ./gridrec_project --no-deps`.
 
 ```python
 from urct_gridrec import gridrec
@@ -86,6 +95,7 @@ python benchmarks/bench_phantom.py --device gpu    # on a machine with CuPy and 
 
 ## Status
 
+- Integrated into URCT as the `gridrec` backend (CPU by default).
 - CPU: complete, tested against the exact Fourier sum, the reference, and FBP.
 - GPU: kernel and glue tested on the CUDA simulator only. Not yet run on a real
   GPU, so its speed is unmeasured and `cupy` interplay (cuFFT, memory) is untested.

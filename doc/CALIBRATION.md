@@ -64,6 +64,7 @@ result = search_center(sino_180, backend="algotom", guess=147.0, tolerance=15, n
 result.best          # the winning center
 result.candidates    # [CenterCandidate(center, metric, score), ...] best first; score 1.0 = winner
 result.start, result.stop, result.at_edge
+result.curve         # (centers, metric values) the search evaluated on the way, or None
 ```
 
 `find_center()` returns one number. `search_center()` searches a window you
@@ -82,6 +83,41 @@ is wrong the alternatives are the next things to try.
   center may be outside it, so widen the tolerance or move the guess. Very
   small centers (a few columns from the detector edge) can produce spurious
   minima; keep the window to where the axis plausibly is.
+
+## `scan_centers()`: the whole curve
+
+```python
+from calibration import scan_centers, center_grid, list_metrics
+
+centers = center_grid(width, -20, 20, 81)             # 81 trial centers, shifts from the detector middle
+scan = scan_centers("vo", centers, sinogram=sino, angles=angles)                    # a sinogram metric
+scan = scan_centers("sharpness", centers, reconstruct=lambda c: slice_at(c))        # a slice metric
+scan.best, scan.at_edge, scan.rival, scan.centers, scan.values, scan.quality
+```
+
+Where `search_center()` returns the answer of one method, `scan_centers()` returns the metric at every trial
+center (`calibration/metrics.py`), which is what the GUI plots. `scan.quality` is the raw `values` rescaled to
+[0, 1] with 1 the best trial whichever way the metric points; `scan.best` is refined below the grid spacing by a
+parabola through the best trial and its neighbours; `at_edge` means the best trial is the first or last (the true
+center may lie outside); `rival` is the best separate peak, `(center, quality)`, or `None`. `progress(done, total)`
+and `cancelled()` callbacks are supported (`ScanCancelled` is raised).
+
+| Metric | Kind | Better | What it looks at |
+|---|---|---|---|
+| `vo` | sinogram | lower | Vo's Fourier-domain symmetry of the 0-180 degree sinogram (needs `algotom`) |
+| `pair_registration` | sinogram | lower | projections 180 degrees apart mirrored about the trial center must agree; needs such pairs (a 0-360 scan has many, a 0-180 scan a few) |
+| `sharpness` | slice | higher | gradient energy of the reconstructed slice |
+| `entropy` | slice | lower | histogram entropy of the slice |
+| `total_variation` | slice | lower | mean gradient magnitude; noise-sensitive |
+| `negativity` | slice | lower | share of the energy that is negative; noise-sensitive |
+| `std` | slice | higher | standard deviation; a weak cross-check |
+
+A sinogram metric takes `sinogram` (transmission, `(n_angles, width)`) and `angles` (degrees); a slice metric takes
+`reconstruct(center) -> 2D image` and is evaluated inside a disc covering 95% of the field of view. Your own metric
+is a `CenterMetric` subclass decorated with `@register_metric`. For cone beam the central plane's sinogram is a
+fan-beam sinogram, only approximately mirror-symmetric, so the sinogram metrics are approximate there (Vo was
+several pixels off on a cone scan whose object was cut off by the field of view, and within 0.1 px on the
+`samples/` scans); the slice metrics on the exact central slice are not affected.
 
 ## `find_tilt()`
 

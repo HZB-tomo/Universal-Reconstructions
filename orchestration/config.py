@@ -79,7 +79,9 @@ class ProjectConfig:
     # file/derive/default strategies already built for them) before
     # reconstruct() runs. Duplicating them here would let a project's
     # answer disagree with itself.
-    reconstruction_backend: str = "algotom_fbp"
+    # None = the default for the project's geometry (reconstruction.default_backend(): gridrec for parallel
+    # beam, astra_fdk on the GPU for cone beam), settled by PipelineRun.complete() once the geometry is known.
+    reconstruction_backend: Optional[str] = None
     device: Optional[str] = None
     reconstruction_options: dict = field(default_factory=dict)  # backend-specific, code-only
     # Reconstruction filter (ramp, hann, ...), see ReconstructionBackend.filters. None = the backend's
@@ -123,10 +125,25 @@ class ProjectConfig:
         from reconstruction import get_backend
 
         options = dict(self.reconstruction_options)
+        if self.reconstruction_backend is None:         # not settled yet: nothing to say about its filter
+            return options
         if self.reconstruction_filter and "filter_name" not in options:
             if get_backend(self.reconstruction_backend).filters:
                 options["filter_name"] = self.reconstruction_filter
         return options
+
+    def resolve_backend(self, geometry_type: Optional[str]) -> str:
+        """Settle an unset reconstruction_backend to the default for `geometry_type`; returns the backend's name."""
+        from reconstruction import default_backend
+
+        if self.reconstruction_backend is None:
+            self.reconstruction_backend = default_backend(geometry_type)
+            if self.reconstruction_backend is None:
+                raise ValueError(
+                    f"no usable {geometry_type or 'parallel'}-beam reconstruction backend is installed "
+                    "(see doc/RECONSTRUCTION.md for what each needs)"
+                )
+        return self.reconstruction_backend
 
     def resolved_project_id(self) -> str:
         """project_id if set, else the stem of `path` (the data file's

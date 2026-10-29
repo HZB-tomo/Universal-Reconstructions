@@ -8,6 +8,7 @@ an import line below.
 from reconstruction.backends import algotom_fbp  # noqa: F401
 from reconstruction.backends import gridrec  # noqa: F401
 from reconstruction.backends import rtk_fdk  # noqa: F401
+from reconstruction.backends import astra_fdk  # noqa: F401
 from reconstruction.backends import algotom_gridrec  # noqa: F401
 from reconstruction.backends import algotom_bpf  # noqa: F401
 from reconstruction.backends import algotom_dfi  # noqa: F401
